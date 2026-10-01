@@ -61,8 +61,9 @@ A small always-on-top panel, shaped like the floating helpers people already kee
 their work. It has a one-line status strip and expands to show everything.
 
 Strip: an **ARMED / DISARMED** button you can click, whether the phone is connected, and
-a `+` / `-` to expand. Drag anywhere on it to move it. No taskbar button; close it to hide
-to the tray, where the same controls are mirrored.
+a `+` / `-` to expand. Drag anywhere on it to move it. It opens centred, remembers where
+you put it, and refuses to sit somewhere you can no longer reach. No taskbar button;
+close it to hide to the tray, where the same controls are mirrored.
 
 Expanded it adds the phone address, the last thing typed, the buffer list, and buttons to
 rebind the hotkey, clear the buffer, copy the address, and quit.

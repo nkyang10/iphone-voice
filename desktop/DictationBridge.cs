@@ -1259,6 +1259,7 @@ namespace DictationBridge
         private Button _toggle;
         private Button _collapse;
         private Button _setHotkey;
+        private Label _hotkeyLabel;
         private CheckBox _flushBox;
         private TextBox _lastText;
         private ListBox _bufferList;
@@ -1269,6 +1270,11 @@ namespace DictationBridge
         private bool _expanded;
         private bool _suppressFlushEvent;
 
+        // One place that owns the sizes, so expand and collapse cannot disagree.
+        private static readonly Size CollapsedSize = new Size(270, 46);
+        private static readonly Size ExpandedSize = new Size(270, 320);
+        private const string PositionFile = "dictation-bridge-position.txt";
+
         public MainForm(Bridge bridge, string url, HotkeyWindow hotkeys)
         {
             _bridge = bridge;
@@ -1277,8 +1283,14 @@ namespace DictationBridge
 
             Text = "Dictation Bridge";
             FormBorderStyle = FormBorderStyle.None;
-            ClientSize = new Size(268, 44);
-            Size = new Size(268, 44);
+            Size = CollapsedSize;
+            // Lock the width and allow only the height to change. Without this,
+            // any child whose minimum size exceeds the client width makes
+            // WinForms grow the form, and the panel no longer matches its
+            // collapsed and expanded sizes.
+            MinimumSize = CollapsedSize;
+            MaximumSize = ExpandedSize;
+            AutoSize = false;
             StartPosition = FormStartPosition.Manual;
             BackColor = Color.FromArgb(22, 24, 28);
             ForeColor = Color.FromArgb(232, 234, 237);
@@ -1322,8 +1334,70 @@ namespace DictationBridge
             _timer = new System.Windows.Forms.Timer { Interval = 700 };
             _timer.Tick += (s, e) => Refresh2();
             _timer.Start();
-            FormClosed += (s, e) => _timer.Stop();
+            FormClosed += (s, e) => { _timer.Stop(); SavePosition(); };
+            LoadPosition();
             Refresh2();
+        }
+
+        // A panel that opens on top of the taskbar, or half off the edge of a
+        // screen, is worse than no panel. Remember where the user put it, but
+        // only reuse that spot if it is still on a screen that exists.
+        private void LoadPosition()
+        {
+            Point? remembered = null;
+            try
+            {
+                string path = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, PositionFile);
+                if (System.IO.File.Exists(path))
+                {
+                    string[] parts = System.IO.File.ReadAllText(path).Split(',');
+                    int px, py;
+                    if (parts.Length == 2
+                        && int.TryParse(parts[0], out px)
+                        && int.TryParse(parts[1], out py))
+                    {
+                        remembered = new Point(px, py);
+                    }
+                }
+            }
+            catch (Exception) { }
+
+            Rectangle area = remembered.HasValue
+                ? Screen.FromPoint(remembered.Value).WorkingArea
+                : Screen.PrimaryScreen.WorkingArea;
+
+            if (remembered.HasValue && OnScreen(remembered.Value, area))
+            {
+                Location = remembered.Value;
+                return;
+            }
+
+            // Default: centred, biased a little above the middle so it does not
+            // sit on top of the text you are working on.
+            Location = new Point(
+                area.Left + (area.Width - Width) / 2,
+                area.Top + (area.Height - Height) / 3);
+        }
+
+        private bool OnScreen(Point p, Rectangle area)
+        {
+            // Require a decent strip of the panel to be reachable, not just one
+            // pixel, or the user cannot click it back into view.
+            const int Grab = 60;
+            return p.X < area.Right - 10 && p.X + Grab > area.Left
+                && p.Y < area.Bottom - 10 && p.Y + Grab > area.Top;
+        }
+
+        private void SavePosition()
+        {
+            try
+            {
+                System.IO.File.WriteAllText(
+                    System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, PositionFile),
+                    Location.X + "," + Location.Y);
+            }
+            catch (Exception) { }
         }
 
         private void BuildUi(Control host)
@@ -1375,7 +1449,7 @@ namespace DictationBridge
                 ForeColor = Color.FromArgb(154, 160, 166)
             };
             _collapse.FlatAppearance.BorderSize = 0;
-            _collapse.Click += (s, e) => SetExpanded(false);
+            _collapse.Click += (s, e) => SetExpanded(!_expanded);
 
             _strip.Controls.Add(_status);
             _strip.Controls.Add(_toggle);
@@ -1438,20 +1512,29 @@ namespace DictationBridge
                 ForeColor = Color.FromArgb(128, 134, 139)
             };
 
-            var bottom = new Panel
+var bottom = new TableLayoutPanel
             {
                 Dock = DockStyle.Bottom,
-                Height = 46,
+                Height = 104,
                 BackColor = Color.FromArgb(22, 24, 28),
+                ColumnCount = 2,
+                RowCount = 4,
                 Padding = new Padding(0, 4, 0, 0)
             };
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            for (int i = 0; i < 4; i++)
+            {
+                bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+            }
+            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 22F));
 
             _flushBox = new CheckBox
             {
                 Text = "Buffer while disarmed",
                 Checked = true,
                 AutoSize = true,
-                Location = new Point(10, 6),
+                Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI", 8F),
                 FlatStyle = FlatStyle.Flat
             };
@@ -1465,50 +1548,67 @@ namespace DictationBridge
                     : "mode: drop while disarmed");
             };
 
-            _setHotkey = SmallButton("Set hotkey", 80, new Point(10, 24), (s, e) => Rebind());
-            var clearButton = SmallButton("Clear", 56, new Point(94, 24), (s, e) => _bridge.ClearBuffer());
-            var copyButton = SmallButton("Copy URL", 66, new Point(154, 24), (s, e) => Copy(_url));
-            var quitButton = SmallButton("Quit", 48, new Point(224, 24), (s, e) => Close());
+            _hotkeyLabel = new Label
+            {
+                Text = "Hotkey: " + _hotkeys.Combination,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Segoe UI", 8F),
+                ForeColor = Color.FromArgb(154, 160, 166),
+                AutoEllipsis = true
+            };
 
-            bottom.Controls.Add(_flushBox);
-            bottom.Controls.Add(_setHotkey);
-            bottom.Controls.Add(clearButton);
-            bottom.Controls.Add(copyButton);
-            bottom.Controls.Add(quitButton);
+            _setHotkey = FlatButton("Change hotkey", (s, e) => Rebind());
+            var clearButton = FlatButton("Clear buffer", (s, e) => _bridge.ClearBuffer());
+            var copyButton = FlatButton("Copy address", (s, e) => Copy(_url));
+            // Close() alone would be swallowed by the hide-to-tray handler, so quitting is
+// routed back to the tray context which knows how to really exit.
+var quitButton = FlatButton("Quit", (s, e) => Quit());
 
+            bottom.Controls.Add(_flushBox, 0, 0);
+            bottom.SetColumnSpan(_flushBox, 2);
+            bottom.Controls.Add(_hotkeyLabel, 0, 1);
+            bottom.SetColumnSpan(_hotkeyLabel, 2);
+            bottom.Controls.Add(_setHotkey, 0, 2);
+            bottom.Controls.Add(clearButton, 1, 2);
+            bottom.Controls.Add(copyButton, 0, 3);
+            bottom.Controls.Add(quitButton, 1, 3);
+
+            // Everything below the strip must live inside _detail. Adding the
+            // bottom bar to _body instead left its buttons drawn on top of the
+            // collapsed strip, where they swallowed clicks aimed for "+".
             _detail.Controls.Add(listWrap);
             _detail.Controls.Add(listLabel);
             _detail.Controls.Add(lastRow);
             _detail.Controls.Add(phoneRow);
+            _detail.Controls.Add(bottom);
 
             _body.Controls.Add(_detail);
-            _body.Controls.Add(bottom);
             _body.Controls.Add(_strip);
 
             host.Controls.Add(_body);
             SetExpanded(false);
 
             // Drag anywhere on the strip or the padding.
-            _strip.MouseDown += OnDragStart;
-            _body.MouseDown += OnDragStart;
-            _detail.MouseDown += OnDragStart;
-            _status.MouseDown += OnDragStart;
+            MakeDraggable(_strip);
+            MakeDraggable(_body);
+            MakeDraggable(_detail);
+            MakeDraggable(_status);
             _status.MouseDoubleClick += (s, e) => SetExpanded(!_expanded);
-            _collapse.MouseDoubleClick += (s, e) => SetExpanded(true);
         }
 
-        private static Button SmallButton(string text, int width, Point at, EventHandler onClick)
+        private static Button FlatButton(string text, EventHandler onClick)
         {
             var b = new Button
             {
                 Text = text,
-                Size = new Size(width, 20),
-                Location = at,
+                Dock = DockStyle.Fill,
                 FlatStyle = FlatStyle.Flat,
                 UseVisualStyleBackColor = false,
                 Font = new Font("Segoe UI", 8F),
                 BackColor = Color.FromArgb(45, 49, 56),
-                ForeColor = Color.FromArgb(232, 234, 237)
+                ForeColor = Color.FromArgb(232, 234, 237),
+                Margin = new Padding(2)
             };
             b.FlatAppearance.BorderSize = 0;
             b.Click += onClick;
@@ -1528,48 +1628,79 @@ namespace DictationBridge
             Refresh2();
         }
 
+        private void MakeDraggable(Control c)
+        {
+            c.MouseDown += OnDragStart;
+            c.MouseMove += OnDragMove;
+            c.MouseUp += OnDragEnd;
+        }
+
         private void OnDragStart(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
             _dragging = true;
             _dragOrigin = e.Location;
+            // Without capture the move events go to whichever control is under
+            // the cursor, not to the one that took the mouse down, so the form's
+            // own OnMouseMove never fires and the panel does not follow.
+            try { ((Control)sender).Capture = true; } catch (Exception) { }
         }
 
-        protected override void OnMouseMove(MouseEventArgs e)
+        private void OnDragMove(object sender, MouseEventArgs e)
         {
-            base.OnMouseMove(e);
             if (!_dragging) return;
             Location = new Point(Location.X + e.X - _dragOrigin.X,
                                   Location.Y + e.Y - _dragOrigin.Y);
         }
 
-        protected override void OnMouseUp(MouseEventArgs e)
+        private void OnDragEnd(object sender, MouseEventArgs e)
         {
-            base.OnMouseUp(e);
+            if (!_dragging) return;
             _dragging = false;
+            try { ((Control)sender).Capture = false; } catch (Exception) { }
+            // Keep it reachable if it was dragged somewhere awkward.
+            ClampIntoView();
+            // Save on every drop, not only on exit, so the position survives a
+            // crash or a task-manager kill.
+            SavePosition();
+        }
+
+        private void ClampIntoView()
+        {
+            Rectangle area = Screen.FromPoint(Location).WorkingArea;
+            int x = Location.X;
+            int y = Location.Y;
+            if (x + Width < area.Left + 60) x = area.Left + 60 - Width;
+            if (x > area.Right - 60) x = area.Right - 60;
+            if (y < area.Top) y = area.Top;
+            if (y + Height > area.Bottom) y = area.Bottom - Height;
+            Location = new Point(x, y);
+        }
+
+        public event Action QuitRequested;
+
+        private void Quit()
+        {
+            if (QuitRequested != null) QuitRequested();
         }
 
         private void SetExpanded(bool expanded)
         {
             _expanded = expanded;
-            if (expanded)
-            {
-                _detail.Visible = true;
-                ClientSize = new Size(268, 268);
-                Size = new Size(270, 290);
-                _collapse.Text = "_";
-            }
-            else
-            {
-                _detail.Visible = false;
-                ClientSize = new Size(268, 44);
-                Size = new Size(270, 46);
-                _collapse.Text = "+";
-            }
-            _toggle.Text = _bridge.Armed ? "ARMED" : "DISARMED";
-            _setHotkey.Text = "Hotkey";
-            ToolTip tip = new ToolTip();
-            tip.SetToolTip(_toggle, "Toggle typing. Shortcut: " + _hotkeys.Combination);
+            // Visible alone was not enough: while collapsed, clicks at those
+            // coordinates still reached the Quit button underneath and closed the
+            // app. Disabling removes it from hit testing as well.
+            _detail.Visible = expanded;
+            _detail.Enabled = expanded;
+            // Size last: assigning ClientSize afterwards recomputes the outer
+            // size and eats the one-pixel shadow border.
+            Size = expanded ? ExpandedSize : CollapsedSize;
+            PerformLayout();
+            foreach (Control c in _body.Controls) c.PerformLayout();
+            _body.PerformLayout();
+            _collapse.Text = expanded ? "_" : "+";
+            _collapse.Invalidate();
+            _strip.Invalidate();
         }
 
         private void Copy(string text)
@@ -1597,8 +1728,8 @@ namespace DictationBridge
                 ? Color.FromArgb(52, 168, 83)
                 : Color.FromArgb(249, 171, 0);
 
-            _setHotkey.Text = _hotkeys.Combination;
-            _setHotkey.Width = Math.Max(80, _setHotkey.Text.Length * 7 + 14);
+            _setHotkey.Text = "Change hotkey";
+            _hotkeyLabel.Text = "Hotkey: " + _hotkeys.Combination;
 
             _lastText.Text = _bridge.LastText;
 
@@ -1688,6 +1819,11 @@ namespace DictationBridge
             _hotkeys.Register();
 
             _form = new MainForm(_bridge, url, _hotkeys);
+            _form.QuitRequested += () =>
+            {
+                _reallyQuitting = true;
+                ExitThread();
+            };
             _form.Show();
             _form.FormClosing += (s, e) =>
             {

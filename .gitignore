@@ -7,8 +7,9 @@
 diagnostics.log*
 dictation-bridge.log
 
-# Local preference: which hotkey the user chose.
+# Local preferences: which hotkey the user chose, where they put the panel.
 dictation-bridge-hotkey.txt
+dictation-bridge-position.txt
 
 # Compiled binary. The source is the artifact; build with build.ps1.
 *.exe

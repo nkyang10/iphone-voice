@@ -45,6 +45,22 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   `FormBorderStyle.None` and `ShowInTaskbar = false`, with a one-pixel transparent
   shadow panel so the edge is not invisible. Keep it that way; a caption or a
   taskbar button defeats the point of a floating helper.
+- Everything below the strip must be a child of `_detail`, never of `_body`.
+  Adding the bottom bar to `_body` left its buttons drawn on top of the collapsed
+  strip, where they swallowed clicks aimed for the expand button and closed the
+  app instead. `SetExpanded` clears `Enabled` as well as `Visible` for the same
+  reason.
+- The form's width is pinned with `MinimumSize`/`MaximumSize`. Absolute `Location`
+  values inside a docked panel do not shrink that panel's minimum size, so a child
+  extending past the client width makes WinForms grow the form and every size
+  constant stops meaning anything. Use `TableLayoutPanel` or `Dock` for the rows.
+- Only the strip drags. Mouse-move goes to whichever control took the mouse down,
+  so the form's own `OnMouseMove` never fires; each draggable control handles
+  `MouseMove` itself and sets `Capture`. Save the position on drop, not on exit,
+  so a crash or a task-manager kill does not lose it.
+- A `Close()` from a panel button is swallowed by the hide-to-tray `FormClosing`
+  handler. Raise `QuitRequested` and let the tray context set `_reallyQuitting`;
+  that is the only path that actually exits.
 - `MainForm`'s fields are deliberately **not** `readonly`: they are assigned in
   `BuildUi`, which the constructor calls, but C# requires the assignment to be
   inside a constructor body.
