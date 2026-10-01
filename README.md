@@ -43,6 +43,18 @@ Safari does, so the certificate has to be installed once:
 3. Settings > General > About > Certificate Trust Settings > enable it.
 4. Open the address from step 2.
 
+**You only do this once.** The desktop keeps its certificate between runs and reuses
+it, so restarting the app or rebooting the PC never needs a reinstall.
+
+The certificate also covers the name `dictation-bridge.local`. If the phone can resolve
+that, use `https://dictation-bridge.local:8080/` instead of the IP and the same
+certificate keeps working on **any** network, even a different address. It does not
+resolve everywhere, so treat the IP as the reliable route and the name as a bonus.
+
+If the address changes to one the certificate does not list, the desktop logs
+`issuing a new one` and the phone will need the new `dictation-bridge.cer` installed
+again. That is the only case that asks you to repeat this.
+
 ## Why iOS needs any of this
 
 `SpeechRecognition` is `[SecureContext]`-gated. On a plain `http://` page Safari does not

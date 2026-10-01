@@ -119,16 +119,26 @@ namespace DictationBridge
             string caCerPath = System.IO.Path.Combine(dir, "dictation-bridge.cer");
             cerPath = caCerPath;
 
-            // The SAN lists every address this machine has, so a DHCP change that
-            // hands out a different address is covered by the same certificate
-            // most of the time. When it genuinely is not covered, we mint a new
-            // one and the phone needs the setup step again.
+            // Reuse the saved certificate unless it is about to expire or it does
+            // not cover today's address. The SAN carries the stable .local name as
+            // well as every current IP, so a phone using either keeps working.
             X509Certificate2 existing = Load(pfxPath);
             if (existing != null && Covers(existing, ip)
                 && existing.NotAfter > DateTime.Now.AddDays(30))
             {
                 Log.Write("reusing certificate " + existing.Thumbprint);
                 return existing;
+            }
+
+            if (existing != null)
+            {
+                // Worth saying out loud: this is the one case that makes the
+                // phone ask to trust a new certificate.
+                Log.Write("address " + ip + " is not covered by the saved " +
+                          "certificate; issuing a new one");
+                Log.Write("  if the phone already trusted the old one, it will " +
+                          "reject this until " + StableName +
+                          " or the new .cer is installed again");
             }
 
             Log.Write("generating certificate for " + ip);
@@ -185,8 +195,16 @@ namespace DictationBridge
 
         // Every address the phone might legitimately use goes into the SAN, so a
         // name mismatch on the socket port cannot happen.
+        // Stable name for the app, so the certificate survives a change of
+        // address. iOS resolves .local names through Bonjour, so if this
+        // machine is visible that way the phone can use the name instead of the
+        // IP and one installed certificate keeps working on every network.
+        public const string StableName = "dictation-bridge.local";
+
         public static void AddLocalAddresses(SubjectAlternativeNameBuilder san)
         {
+            san.AddDnsName(StableName);
+            san.AddDnsName(StaleHostName);
             san.AddIpAddress(IPAddress.Loopback);
             san.AddDnsName("localhost");
             try
@@ -206,6 +224,24 @@ namespace DictationBridge
             catch (Exception) { }
         }
 
+        // The old computer name is kept in the SAN as well, because it rarely
+        // changes and a phone may still be using it.
+        public static string StaleHostName
+        {
+            get
+            {
+                try
+                {
+                    string n = System.Net.Dns.GetHostName();
+                    if (string.IsNullOrEmpty(n)) return "unused.local";
+                    int dot = n.IndexOf('.');
+                    if (dot > 0) n = n.Substring(0, dot);
+                    return n + ".local";
+                }
+                catch (Exception) { return "unused.local"; }
+            }
+        }
+
         public static string Describe(X509Certificate2 cert)
         {
             if (cert == null) return "none";
@@ -223,12 +259,16 @@ namespace DictationBridge
             return string.Join(" ", parts.ToArray());
         }
 
+        // True when the certificate is good for today: it either carries the
+        // address, or it carries the stable name, in which case the phone can be
+        // reached without the address mattering.
         private static bool Covers(X509Certificate2 cert, string ip)
         {
             foreach (X509Extension ext in cert.Extensions)
             {
                 if (ext.Oid.Value != "2.5.29.17") continue;
                 string text = ext.Format(false);
+                if (text.Contains("DNS Name=" + StableName)) return true;
                 if (text.Contains(ip)) return true;
             }
             return false;
