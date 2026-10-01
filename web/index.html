@@ -373,6 +373,31 @@
   function startPolling() {
     pollStatus();
     setInterval(pollStatus, POLL_MS);
+    checkVersion();
+    setInterval(checkVersion, 60000);
+  }
+
+  // iOS Safari keeps a cached copy even with no-store, so a phone left open
+  // across a desktop rebuild would keep running the old script. Ask the
+  // desktop what it is serving and reload when it differs.
+  function checkVersion() {
+    return fetch('/config', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (cfg) {
+        if (!cfg.version) return;
+        var known = null;
+        try { known = localStorage.getItem('page-version'); } catch (e) {}
+        if (known === null) {
+          try { localStorage.setItem('page-version', cfg.version); } catch (e) {}
+          return;
+        }
+        if (known !== cfg.version) {
+          note('ui', 'desktop rebuilt the page, reloading');
+          try { localStorage.setItem('page-version', cfg.version); } catch (e) {}
+          location.reload(true);
+        }
+      })
+      .catch(function () {});
   }
 
   // ---- recognizer -----------------------------------------------------------
@@ -717,6 +742,15 @@
     try { if (rec) rec.abort(); } catch (e) {}
   });
 
+  // Exposed for diagnostics and for the browser-side test harness. Harmless:
+  // nothing here reaches the desktop except through the same token-checked
+  // endpoints the page already uses.
+  window.dictationBridge = {
+    versionCheck: checkVersion,
+    stats: function () { return stats; },
+    transcript: function () { return history.slice(); }
+  };
+
   // ---- diagnostics UI -------------------------------------------------------
 
   function renderDiag() {
@@ -812,7 +846,10 @@
   post('/config')
     .then(function (cfg) {
       token = cfg.token;
-      note('ui', 'config loaded');
+      try {
+        if (cfg.version) localStorage.setItem('page-version', cfg.version);
+      } catch (e) {}
+      note('ui', 'config loaded, page ' + (cfg.version || '?'));
       noteEnvironment();
       el.wsLabel.textContent = 'loading';
       startPolling();
@@ -839,3 +876,6 @@
 </script>
 </body>
 </html>
+
+
+

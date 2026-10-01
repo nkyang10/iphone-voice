@@ -18,6 +18,16 @@ if (-not (Test-Path $csc)) {
     throw "csc.exe not found at $csc"
 }
 
+# Writing the exe fails while a copy is running, so stop it first. Report it
+# loudly rather than letting csc print a confusing CS0016 and carry on with the
+# previous binary.
+$running = Get-Process DictationBridge -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Host "stopping the running app so the exe can be replaced"
+    $running | Stop-Process -Force
+    Start-Sleep -Milliseconds 800
+}
+
 $src = Join-Path $root 'desktop\DictationBridge.cs'
 $page = Join-Path $root 'web\index.html'
 $exe = Join-Path $root 'desktop\DictationBridge.exe'

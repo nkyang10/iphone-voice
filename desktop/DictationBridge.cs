@@ -772,7 +772,11 @@ namespace DictationBridge
                 }
                 else if (path == "/config")
                 {
-                    outBody = "{\"token\":" + Bridge.Json(token) + "}";
+                    // The page version lets an already-open phone notice that the
+                    // desktop rebuilt the page and reload itself, instead of
+                    // quietly running stale JavaScript.
+                    outBody = "{\"token\":" + Bridge.Json(token) +
+                              ",\"version\":" + Bridge.Json(PageVersion()) + "}";
                     outType = "application/json";
                 }
                 else if (path == "/status")
@@ -830,11 +834,16 @@ namespace DictationBridge
                 byte[] payloadBytes = Encoding.UTF8.GetBytes(outBody);
                 string statusText = status == 200 ? "200 OK"
                     : status == 403 ? "403 Forbidden" : "404 Not Found";
+                // no-store alone is not reliably honoured on iOS: Safari keeps a
+                // copy in its back/forward cache and will re-serve it after the
+                // desktop rebuilds the page. Spell it out every way.
                 byte[] responseHead = Encoding.ASCII.GetBytes(
                     "HTTP/1.1 " + statusText + "\r\n" +
                     "Content-Type: " + outType + "\r\n" +
                     "Content-Length: " + payloadBytes.Length + "\r\n" +
-                    "Cache-Control: no-store\r\n" +
+                    "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n" +
+                    "Pragma: no-cache\r\n" +
+                    "Expires: 0\r\n" +
                     "Access-Control-Allow-Origin: *\r\n" +
                     "Connection: close\r\n\r\n");
                 stream.Write(responseHead, 0, responseHead.Length);
@@ -849,6 +858,28 @@ namespace DictationBridge
             {
                 try { client.Close(); } catch (Exception) { }
             }
+        }
+
+        // Cheap fingerprint of the embedded page. Changes whenever the page is
+        // rebuilt, which is exactly when a phone needs to reload.
+        private static string _version;
+        private static System.Security.Cryptography.SHA1 _sha;
+
+        public static string PageVersion()
+        {
+            if (_version != null) return _version;
+            try
+            {
+                string page = Page();
+                if (_sha == null) _sha = System.Security.Cryptography.SHA1.Create();
+                byte[] hash = _sha.ComputeHash(Encoding.UTF8.GetBytes(page));
+                _version = BitConverter.ToString(hash).Replace("-", "").Substring(0, 12);
+            }
+            catch (Exception)
+            {
+                _version = "unknown";
+            }
+            return _version;
         }
 
         // The page is compiled into the executable, so this is one file to copy
