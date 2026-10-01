@@ -47,9 +47,15 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   taskbar button defeats the point of a floating helper.
 - The palette lives in `Skin`. Everything is painted by `Skin.RoundedPath` and
   the small `Paint*` controls; do not reintroduce stock grey WinForms buttons.
-- A custom-painted control cannot set `BackColor = Color.Transparent` before it
-  is parented: it throws "not a valid owner window handle". Neither can a
-  `TextBox`. Let the parent paint the background instead.
+- Never use `TransparencyKey` on this form. It switches the window into a
+  layered mode that turns GDI text antialiasing off, so every custom-painted
+  string comes out jagged. Round the corners with a `Region` in `OnPaint`
+  instead, and keep `Color.Transparent` out of it: a custom-painted control
+  or a `TextBox` given that back colour throws "not a valid owner window
+  handle" before it is parented, and once parented it still routes through
+  the layered path.
+- Set `TextRenderingHint = ClearTypeGridFit` in every custom `OnPaint` that
+  draws text, or the labels alias even without the transparency key.
 - Everything below the strip must be a child of `_detail`, never of `_body`.
   Adding the bottom bar to `_body` left its buttons drawn on top of the collapsed
   strip, where they swallowed clicks aimed for the expand button and closed the

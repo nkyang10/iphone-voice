@@ -1360,6 +1360,7 @@ namespace DictationBridge
         public static readonly Color Warn = Color.FromArgb(184, 122, 0);
         public static readonly Color Danger = Color.FromArgb(197, 48, 48);
         public static readonly Color Shadow = Color.FromArgb(28, 32, 44);
+        public static readonly Color ShadowEdge = Color.FromArgb(216, 220, 228);
 
         public static Font Ui { get { return new Font("Segoe UI", 9F); } }
         public static Font UiSmall { get { return new Font("Segoe UI", 8.25F); } }
@@ -1421,10 +1422,11 @@ namespace DictationBridge
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer, true);
-            // Not BackColor.Transparent: a custom-painted control with that
-            // back colour throws "not a valid owner window handle" unless it is
-            // parented first. Transparent-back-colour comes from the parent at
-            // paint time instead, which is what we want anyway.
+            // Explicit, not Color.Transparent: a custom-painted control given
+            // that back colour throws "not a valid owner window handle" unless
+            // it is parented first, and once parented it still routes through
+            // the layered path that aliases text.
+            BackColor = Skin.Surface;
             Size = new Size(12, 12);
         }
 
@@ -1467,10 +1469,16 @@ namespace DictationBridge
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer, true);
+            // An explicit parent colour rather than Color.Transparent, which
+            // throws before parenting and, on a parent, still forces the
+            // layered rendering path that makes text jagged.
+            BackColor = Skin.Surface;
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            e.Graphics.TextRenderingHint =
+                System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             // Graphics.DrawString wants a StringFormat, not TextFormatFlags.
             using (StringFormat f = new StringFormat())
             {
@@ -1509,6 +1517,7 @@ namespace DictationBridge
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer, true);
+            BackColor = Skin.Surface;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -1547,17 +1556,19 @@ namespace DictationBridge
             FlatStyle = FlatStyle.Flat;
             UseVisualStyleBackColor = false;
             FlatAppearance.BorderSize = 0;
-SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer, true);
+            BackColor = Skin.Surface;
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint =
+                System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             bool hot = Enabled && IsDefault;
-            Color fill = Primary ? (hot ? Skin.Accent : Skin.Accent)
-                : (hot ? Hover : Fill);
+            Color fill = hot ? Hover : Fill;
             Color ink = Primary ? Color.White : Ink;
 
             Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
@@ -1613,10 +1624,11 @@ SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
         private PaintText _phoneState;
         private PaintCard _lastCard;
         private Label _listHeader;
+        private Label _emptyNote;
 
         // One place that owns the sizes, so expand and collapse cannot disagree.
         private static readonly Size CollapsedSize = new Size(320, 56);
-        private static readonly Size ExpandedSize = new Size(320, 430);
+        private static readonly Size ExpandedSize = new Size(320, 356);
         private const string PositionFile = "dictation-bridge-position.txt";
 
         public MainForm(Bridge bridge, string url, HotkeyWindow hotkeys)
@@ -1643,36 +1655,18 @@ SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
             ShowInTaskbar = false;
             MinimizeBox = false;
             MaximizeBox = false;
-            Padding = new Padding(1);
-            try { DoubleBuffered = true; } catch (Exception) { }
+            Padding = new Padding(0);
+            // No TransparencyKey. It switches the window into a layered mode where
+            // GDI text antialiasing is switched off, so every custom-painted
+            // string comes out jagged. An opaque card with rounded corners is
+            // both crisper and simpler.
+            BackColor = Skin.ShadowEdge;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
 
-            // Soft shadow, the detail that makes a floating panel look deliberate.
-            try
-            {
-                BackColor = Color.FromArgb(0, 0, 0);
-                TransparencyKey = Color.FromArgb(0, 0, 0);
-                var shadow = new Panel
-                {
-                    Dock = DockStyle.Fill,
-                    BackColor = Color.FromArgb(0, 0, 0),
-                    Padding = new Padding(1, 1, 2, 2)
-                };
-                Controls.Add(shadow);
-                var surface = new Panel
-                {
-                    Dock = DockStyle.Fill,
-                    BackColor = Color.FromArgb(22, 24, 28),
-                    Padding = new Padding(0, 0, 1, 1)
-                };
-                shadow.Controls.Add(surface);
-                BuildUi(surface);
-            }
-            catch (Exception)
-            {
-                // Transparency unsupported: fall back to a plain panel.
-                Controls.Clear();
-                BuildUi(this);
-            }
+            BuildUi(this);
+            ResizeRounded();
+            Resize += (s, e) => ResizeRounded();
 
             _bridge.Changed += Refresh2;
             _timer = new System.Windows.Forms.Timer { Interval = 700 };
@@ -1856,7 +1850,7 @@ private void BuildUi(Control host)
                 Font = Skin.UiSmall,
                 LinkColor = Skin.Accent,
                 ActiveLinkColor = Skin.Accent,
-                BackColor = Color.Transparent
+                BackColor = Skin.Field
             };
             _urlLink.Text = _url;
             _urlLink.LinkClicked += (s, e) => Copy(_url);
@@ -1864,21 +1858,21 @@ private void BuildUi(Control host)
             urlCard.Controls.Add(urlBg);
             urlBg.SendToBack();
 
-            // Last typed utterance, shown as a quote with an accent bar.
+// Last typed utterance, shown as a quote with an accent bar.
             var lastRow = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 58,
+                Height = 52,
                 BackColor = Skin.Surface,
-                Padding = new Padding(0, 6, 0, 6)
+                Padding = new Padding(0, 5, 0, 5)
             };
             // Only the left accent bar is painted; the fill belongs to the
             // TextBox, which sits on top of it.
             _lastCard = new PaintCard
             {
                 Dock = DockStyle.Fill,
-                Fill = Color.Transparent,
-                Corner = 0,
+                Fill = Skin.AccentSoft,
+                Corner = 8,
                 Accent = Skin.Accent
             };
             // A read-only TextBox cannot take Color.Transparent either, so the card
@@ -1928,11 +1922,24 @@ private void BuildUi(Control host)
             };
             listWrap.Controls.Add(_bufferList);
 
+            // An empty queue is a normal state, not a broken table. Say so
+            // instead of leaving a blank rectangle sitting there.
+            _emptyNote = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Nothing waiting.\r\n\r\nSpeak while paused and it is\r\ntyped when you press play.",
+                Font = Skin.UiSmall,
+                ForeColor = Skin.InkFaint,
+                TextAlign = ContentAlignment.MiddleCenter,
+                BackColor = Skin.Page
+            };
+            listWrap.Controls.Add(_emptyNote);
+
             // ---- footer ----------------------------------------------------
             var bottom = new TableLayoutPanel
             {
                 Dock = DockStyle.Bottom,
-                Height = 118,
+                Height = 112,
                 BackColor = Skin.Surface,
                 ColumnCount = 2,
                 RowCount = 4
@@ -1953,7 +1960,7 @@ private void BuildUi(Control host)
                 Font = Skin.UiSmall,
                 ForeColor = Skin.InkSoft,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.Transparent
+                BackColor = Skin.Surface
             };
             _flushBox.FlatAppearance.BorderSize = 0;
             _flushBox.CheckedChanged += (s, e) =>
@@ -2043,6 +2050,42 @@ private void BuildUi(Control host)
             c.MouseDown += OnDragStart;
             c.MouseMove += OnDragMove;
             c.MouseUp += OnDragEnd;
+        }
+
+        // Rounded corners via a Region rather than a transparency key: the shape is
+        // clipped at paint time so the card edges stay crisp and the text inside
+        // keeps GDI antialiasing.
+        private void ResizeRounded()
+        {
+            try
+            {
+                using (GraphicsPath p = Skin.RoundedPath(
+                    new Rectangle(0, 0, Width - 1, Height - 1), 12))
+                {
+                    Region = new Region(p);
+                }
+            }
+            catch (Exception) { }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint =
+                System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            using (SolidBrush b = new SolidBrush(Skin.Surface))
+            {
+                g.FillRectangle(b, ClientRectangle);
+            }
+            using (Pen edge = new Pen(Skin.ShadowEdge))
+            {
+                using (GraphicsPath p = Skin.RoundedPath(
+                    new Rectangle(0, 0, Width - 2, Height - 2), 12))
+                {
+                    g.DrawPath(edge, p);
+                }
+            }
         }
 
         private void OnDragStart(object sender, MouseEventArgs e)
@@ -2160,6 +2203,7 @@ private void BuildUi(Control host)
             {
                 bool hasText = !string.IsNullOrEmpty(_bridge.LastText);
                 _lastCard.Accent = hasText ? Skin.Accent : (Color?)null;
+                _lastCard.Fill = hasText ? Skin.AccentSoft : Skin.Field;
                 _lastCard.Invalidate();
                 _lastText.BackColor = hasText ? Skin.AccentSoft : Skin.Field;
             }
@@ -2173,9 +2217,15 @@ private void BuildUi(Control host)
                 if (buffered > 0) _bufferList.TopIndex = _bufferList.Items.Count - 1;
             }
             _listHeader.Text = buffered == 0
-                ? "WAITING TO TYPE"
+                ? "QUEUE"
                 : "QUEUED   " + buffered + (_bridge.WordCount > 0
                     ? "   " + _bridge.WordCount + " words" : "");
+
+            if (_emptyNote != null)
+            {
+                _emptyNote.Visible = buffered == 0;
+                _bufferList.Visible = buffered > 0;
+            }
         }
     }
 
