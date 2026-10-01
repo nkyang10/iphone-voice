@@ -98,30 +98,53 @@ namespace DictationBridge
     {
         public const string PfxPassword = "dictation-bridge";
 
+        // Self-signed, and that is the floor rather than a preference. Safari
+        // only exposes SpeechRecognition on a secure origin, so plain HTTP cannot
+        // be used here at all, and iOS has no "proceed anyway" button the way
+        // macOS Safari does. A CA hierarchy was tried and reverted: SslStream on
+        // Windows refuses to serve a chain it cannot validate to a root in a
+        // local trust store, and installing that root on a user's PC is not
+        // something this app should do silently.
+        //
+        // Known limitation: if the machine's address changes to one the SAN does
+        // not already list, the certificate is regenerated and the phone must
+        // install the new one.
         public static X509Certificate2 Ensure(string ip, out string cerPath)
         {
             string dir = AppDomain.CurrentDomain.BaseDirectory;
             string pfxPath = System.IO.Path.Combine(dir, "dictation-bridge.pfx");
-            cerPath = System.IO.Path.Combine(dir, "dictation-bridge.cer");
+            string caCerPath = System.IO.Path.Combine(dir, "dictation-bridge.cer");
+            cerPath = caCerPath;
 
-            // Reuse only if the saved cert still covers the current primary address.
+            // The SAN lists every address this machine has, so a DHCP change that
+            // hands out a different address is covered by the same certificate
+            // most of the time. When it genuinely is not covered, we mint a new
+            // one and the phone needs the setup step again.
             X509Certificate2 existing = Load(pfxPath);
-            if (existing != null)
+            if (existing != null && Covers(existing, ip)
+                && existing.NotAfter > DateTime.Now.AddDays(30))
             {
-                if (Covers(existing, ip))
-                {
-                    Log.Write("reusing certificate " + existing.Thumbprint);
-                    return existing;
-                }
-                Log.Write("saved certificate does not cover " + ip + ", regenerating");
-                try { File.Delete(pfxPath); } catch (Exception) { }
+                Log.Write("reusing certificate " + existing.Thumbprint);
+                return existing;
             }
 
-            X509Certificate2 cert;
+            Log.Write("generating certificate for " + ip);
+            X509Certificate2 cert = CreateLeaf(ip);
+            System.IO.File.WriteAllBytes(pfxPath,
+                cert.Export(X509ContentType.Pfx, PfxPassword));
+            System.IO.File.WriteAllBytes(caCerPath, cert.Export(X509ContentType.Cert));
+            Log.Write("certificate " + cert.Thumbprint + " covers " + DescribeSan(cert));
+
+            return Load(pfxPath);
+        }
+
+        private static X509Certificate2 CreateLeaf(string ip)
+        {
             using (RSA rsa = RSA.Create(2048))
             {
                 var request = new CertificateRequest(
-                    "CN=Dictation Bridge", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                    "CN=Dictation Bridge", rsa,
+                    HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
                 var san = new SubjectAlternativeNameBuilder();
                 AddLocalAddresses(san);
@@ -135,19 +158,10 @@ namespace DictationBridge
                     new X509EnhancedKeyUsageExtension(
                         new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, false));
 
-                cert = request.CreateSelfSigned(
-                    DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(5));
+                return request.CreateSelfSigned(
+                    DateTimeOffset.UtcNow.AddDays(-1),
+                    DateTimeOffset.UtcNow.AddYears(5));
             }
-
-            Log.Write("generated certificate " + cert.Thumbprint +
-                      " covering " + DescribeSan(cert));
-
-            byte[] pfx = cert.Export(X509ContentType.Pfx, PfxPassword);
-            System.IO.File.WriteAllBytes(pfxPath, pfx);
-            System.IO.File.WriteAllBytes(cerPath, cert.Export(X509ContentType.Cert));
-
-            // Re-import so the private key is usable by SslStream.
-            return Load(pfxPath);
         }
 
         private static X509Certificate2 Load(string pfxPath)
@@ -1183,6 +1197,7 @@ namespace DictationBridge
         public TrayContext(Bridge bridge, string token, string url)
         {
             _bridge = bridge;
+            _appUrl = url;
 
             _armItem = new ToolStripMenuItem("Armed (Ctrl+Alt+D)");
             _armItem.Click += (s, e) => _bridge.SetArmed(!_bridge.Armed);
@@ -1214,6 +1229,9 @@ namespace DictationBridge
             var clearItem = new ToolStripMenuItem("Clear buffer");
             clearItem.Click += (s, e) => _bridge.ClearBuffer();
 
+            var appItem = new ToolStripMenuItem("Copy app address");
+            appItem.Click += (s, e) => CopyText(_appUrl);
+
             var showItem = new ToolStripMenuItem("Show window");
             showItem.Click += (s, e) => ShowWindow();
 
@@ -1224,6 +1242,7 @@ namespace DictationBridge
             menu.Items.Add(_bufferItem);
             menu.Items.Add(clearItem);
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(appItem);
             menu.Items.Add(copyItem);
             menu.Items.Add(quitItem);
 
@@ -1259,7 +1278,14 @@ namespace DictationBridge
         }
 
         private readonly MainForm _form;
+        private readonly string _appUrl;
         private bool _reallyQuitting;
+
+        private static void CopyText(string text)
+        {
+            try { Clipboard.SetText(text); }
+            catch (Exception) { }
+        }
 
         private void ShowWindow()
         {
@@ -1317,12 +1343,15 @@ namespace DictationBridge
             string ip = PrimaryAddress();
             X509Certificate2 cert = null;
             byte[] pfx = null;
-            string cerPath = null;
+            string caCerPath = null;
             try
             {
-                cert = Certs.Ensure(ip, out cerPath);
-                pfx = cert.Export(X509ContentType.Pfx, Certs.PfxPassword);
-                Log.Write("certificate: " + Certs.Describe(cert));
+                cert = Certs.Ensure(ip, out caCerPath);
+                if (cert != null)
+                {
+                    pfx = cert.Export(X509ContentType.Pfx, Certs.PfxPassword);
+                    Log.Write("certificate: " + Certs.Describe(cert));
+                }
             }
             catch (Exception e)
             {
@@ -1343,15 +1372,17 @@ namespace DictationBridge
             Log.Write("listening: " + scheme + " on " + httpPort + " (page and socket share it)");
             Log.Write("open this on the phone: " + url);
             Log.Write("token: " + token);
+
             Console.WriteLine();
             if (secure)
             {
-                Console.WriteLine("  One-time setup on the iPhone:");
-                Console.WriteLine("   1. Send " + System.IO.Path.GetFileName(cerPath) +
+                Console.WriteLine("  On the iPhone, once:");
+                Console.WriteLine("   1. Send " + System.IO.Path.GetFileName(caCerPath) +
                                   " to the phone and tap it to install.");
-                Console.WriteLine("   2. Settings > General > About > Certificate Trust Settings");
+                Console.WriteLine("   2. Settings > General > VPN & Device Management > Install.");
+                Console.WriteLine("   3. Settings > General > About > Certificate Trust Settings");
                 Console.WriteLine("      > enable the Dictation Bridge certificate.");
-                Console.WriteLine("   3. Open:  " + url);
+                Console.WriteLine("   4. Open:  " + url);
             }
             else
             {
