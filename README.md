@@ -199,4 +199,8 @@ for the conventions and the traps.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
+
+The exe also contains [QRCoder](https://github.com/codebude/QRCoder), which is MIT.
+Its notice ships with the release in `THIRD_PARTY_NOTICES.txt`, and the source is
+vendored in this repository under `vendor/QRCoder`.

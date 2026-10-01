@@ -24,3 +24,10 @@ them alter encoding behaviour:
 
 This is the only third-party code in the project. Adding a second one needs the argument
 made in `AGENTS.md` under "Layout rules".
+
+## Where the notice goes
+
+`LICENSE.txt` here is the authoritative copy. `make-release.ps1` reads it and writes
+`THIRD_PARTY_NOTICES.txt` into the release folder, then fails the build if the text it
+produced is not byte-identical to this file. Do not maintain a second copy of these words
+anywhere: the notice only has to be correct once.

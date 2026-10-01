@@ -18,6 +18,17 @@ $src = Join-Path $root 'desktop\DictationBridge.cs'
 $page = Join-Path $root 'web\index.html'
 if (-not (Test-Path $page)) { throw "missing page: $page" }
 
+# The licences travel with the exe. This project is MIT, and the compiled binary
+# contains QRCoder, which is also MIT and requires its notice to accompany any
+# redistribution. Shipping the exe on its own would not satisfy that.
+$licences = @('LICENSE')
+foreach ($f in $licences) {
+    $p = Join-Path $root $f
+    if (-not (Test-Path $p)) { throw "missing licence file: $p" }
+}
+$vendorLicence = Join-Path $root 'vendor\QRCoder\LICENSE.txt'
+if (-not (Test-Path $vendorLicence)) { throw "missing vendored licence: $vendorLicence" }
+
 # QRCoder, compiled in so the exe stays a single file. Kept in step with
 # build.ps1: a release built without it would have no QR code on the panel.
 $vendorSrc = @(Get-ChildItem (Join-Path $root 'vendor\QRCoder') -Recurse -Filter *.cs |
@@ -235,12 +246,52 @@ The phone screen must stay on and unlocked. It cannot type into a program runnin
 administrator. If your PC's address changes to one the certificate does not list, you
 need to send the certificate to the phone once more.
 
+## Licence
+
+MIT. See LICENSE. The exe includes QRCoder, also MIT; see THIRD_PARTY_NOTICES.txt.
+
 ---
 
 Not affiliated with Apple or Microsoft. Dictation on iOS is Apple's own feature; this
 just forwards the resulting text to your PC.
 '@
 Set-Content -Path (Join-Path $outDir 'README.txt') -Value $readme -Encoding UTF8
+
+foreach ($f in $licences) {
+    Copy-Item (Join-Path $root $f) $outDir
+}
+
+# Build the third-party notice by copying QRCoder's own licence in verbatim
+# rather than retyping it. A hand-transcribed licence is not a licence, and the
+# transcription drifts the first time someone tidies the wording.
+$noticeHeader = @"
+Third-party notices
+====================
+
+Dictation Bridge is licensed under the MIT License; see LICENSE.
+
+The compiled executable contains source from one third-party project. Both are
+permissive, so redistribution is permitted provided the copyright notice and
+licence text travel with the copies. That is why this file ships alongside the
+exe.
+
+Reproduced verbatim from vendor\QRCoder\LICENSE.txt:
+
+------------------------------------------------------------------------------
+"@
+
+$noticeBody = Get-Content $vendorLicence -Raw
+Set-Content -Path (Join-Path $outDir 'THIRD_PARTY_NOTICES.txt') `
+    -Value ($noticeHeader + "`r`n" + $noticeBody) -Encoding UTF8
+
+# Prove the notice is the upstream text, not a paraphrase of it. If this ever
+# fails, the notice was edited by hand somewhere and the release is not
+# redistributable.
+$shippedNotice = Get-Content (Join-Path $outDir 'THIRD_PARTY_NOTICES.txt') -Raw
+if (-not $shippedNotice.Contains($noticeBody.Trim())) {
+    throw "THIRD_PARTY_NOTICES.txt does not carry QRCoder's licence verbatim"
+}
+Write-Host "third-party notice carries QRCoder's licence verbatim"
 
 $size = [math]::Round((Get-Item $exe).Length / 1KB, 1)
 Write-Host ""
