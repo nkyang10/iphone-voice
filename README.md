@@ -183,9 +183,10 @@ error codes, not what you said, unless you tick *include spoken words*.
 
 ## For developers
 
-Build with `.\build.ps1`. It uses the C# compiler that ships with Windows, so there is no
-SDK to install. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to verify a change, and
-[AGENTS.md](AGENTS.md) for the conventions and the traps.
+Build with `.\build.ps1`, or `.\make-release.ps1` for a folder you can hand to someone.
+It uses the C# compiler that ships with Windows, so there is no SDK to install. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to verify a change, and [AGENTS.md](AGENTS.md)
+for the conventions and the traps.
 
 ## License
 

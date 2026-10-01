@@ -164,9 +164,9 @@ iOS 淨係喺安全頁面先會開語音輸入，而且佢個 Safari 冇「繼�
 
 ## 開發者
 
-用 `.\build.ps1` 編譯，用嘅係 Windows 本身附帶嘅 C# 編譯器，所以唔使裝 SDK。
-點樣驗證改動睇 [CONTRIBUTING.md](CONTRIBUTING.md)，項目慣例同啲易踩嘅坑睇
-[AGENTS.md](AGENTS.md)。
+用 `.\build.ps1` 編譯，或者用 `.\make-release.ps1` 整一個可以直接擺俾人嘅資料夾。用嘅係
+Windows 本身附帶嘅 C# 編譯器，所以唔使裝 SDK。點樣驗證改動睇
+[CONTRIBUTING.md](CONTRIBUTING.md)，項目慣例同啲易踩嘅坑睇 [AGENTS.md](AGENTS.md)。
 
 ## 授權
 

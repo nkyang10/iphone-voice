@@ -17,5 +17,9 @@ dictation-bridge.log
 dictation-bridge-hotkey.txt
 dictation-bridge-position.txt
 
+# Build output. `release\` holds a compiled exe and a private key, so it is
+# machine-specific and never committed.
+release/
+
 # Compiled binary. The source is the artifact; build with build.ps1.
 *.exe

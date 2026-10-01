@@ -167,8 +167,9 @@ iOS 只在安全页面上开放语音听写，而且它版本的 Safari 没有�
 
 ## 开发者
 
-使用 `.\build.ps1` 构建，采用 Windows 自带的 C# 编译器，无需安装 SDK。如何验证改动
-见 [CONTRIBUTING.md](CONTRIBUTING.md)，项目约定与常见陷阱见 [AGENTS.md](AGENTS.md)。
+使用 `.\build.ps1` 构建，或 `.\make-release.ps1` 生成一个可直接分发的文件夹。采用
+Windows 自带的 C# 编译器，无需安装 SDK。如何验证改动见 [CONTRIBUTING.md](CONTRIBUTING.md)，
+项目约定与常见陷阱见 [AGENTS.md](AGENTS.md)。
 
 ## 许可
 

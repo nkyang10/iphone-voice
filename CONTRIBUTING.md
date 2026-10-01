@@ -51,10 +51,31 @@ values verbatim and trim them, so a lenient client will pass where Safari fails.
 
 `--ignore-certificate-errors` is required, because the certificate is self-signed.
 
+## Release
+
+```powershell
+.\make-release.ps1
+```
+
+Produces `release\DictationBridge-<version>\` containing the exe with the page compiled
+into it, a `README.txt` for whoever unzips it, the screenshots, and the certificate to
+send to a phone.
+
+The script compiles into the release folder, generates a certificate by running the exe
+briefly, and then **verifies two things that would otherwise ship broken**: that the page
+really is embedded in the exe, and that the shipped `.cer` is the same certificate the app
+will serve. Shipping only the `.cer` looks right but is useless, because a first run with
+no `data\` folder mints a different certificate and the phone would trust the wrong one.
+That is why `data\` travels with the release.
+
+`release\` is gitignored. It holds a private key and is specific to the machine that built
+it, so it is regenerated per release rather than committed.
+
 ## Documentation
 
 `README.md` is for people using the app. Keep it in setup steps, troubleshooting and
-limits. Anything that only matters when editing the code belongs in `AGENTS.md` instead.
+limits. Anything that only matters when editing the code belongs here or in `AGENTS.md`
+instead.
 
 Three READMEs are kept in step: English, Traditional Chinese and Simplified Chinese. If
 you change one, change all three.
