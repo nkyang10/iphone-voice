@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -1342,12 +1343,251 @@ namespace DictationBridge
     // A small always-on-top panel, in the shape of the floating helpers people
     // already keep beside their work: a status strip you can hit to arm, with the
     // details a click away. Borderless and draggable so it never gets in the way.
+    // Light palette. Windows apps that sit on top of your work all tend to be
+    // dark, and a dark block on a light document is the thing your eye snags on.
+    internal static class Skin
+    {
+        public static readonly Color Page = Color.FromArgb(250, 250, 252);
+        public static readonly Color Surface = Color.FromArgb(255, 255, 255);
+        public static readonly Color Field = Color.FromArgb(243, 244, 247);
+        public static readonly Color Ink = Color.FromArgb(32, 35, 42);
+        public static readonly Color InkSoft = Color.FromArgb(108, 115, 128);
+        public static readonly Color InkFaint = Color.FromArgb(160, 166, 178);
+        public static readonly Color Line = Color.FromArgb(228, 230, 236);
+        public static readonly Color Accent = Color.FromArgb(24, 105, 220);
+        public static readonly Color AccentSoft = Color.FromArgb(232, 240, 254);
+        public static readonly Color Good = Color.FromArgb(22, 138, 74);
+        public static readonly Color Warn = Color.FromArgb(184, 122, 0);
+        public static readonly Color Danger = Color.FromArgb(197, 48, 48);
+        public static readonly Color Shadow = Color.FromArgb(28, 32, 44);
+
+        public static Font Ui { get { return new Font("Segoe UI", 9F); } }
+        public static Font UiSmall { get { return new Font("Segoe UI", 8.25F); } }
+        public static Font UiTiny { get { return new Font("Segoe UI", 7.5F); } }
+        public static Font Strong { get { return new Font("Segoe UI", 9.25F, FontStyle.Bold); } }
+        public static Font Badge { get { return new Font("Segoe UI", 8.5F, FontStyle.Bold); } }
+        public static Font Title { get { return new Font("Segoe UI", 10.5F, FontStyle.Bold); } }
+        public static Font Quote { get { return new Font("Segoe UI", 10F); } }
+
+        // Rounded corners make a borderless panel look like a card rather than a
+        // rectangle someone forgot to title-bar.
+        public static void Round(Control c, int radius)
+        {
+            try
+            {
+                using (GraphicsPath path = Rounded(c.ClientRectangle.Size, radius))
+                {
+                    Region region = new Region(path);
+                    c.Region = region;
+                }
+            }
+            catch (Exception) { }
+        }
+
+        private static GraphicsPath Rounded(Size size, int radius)
+        {
+            GraphicsPath p = new GraphicsPath();
+            int d = radius * 2;
+            p.AddArc(0, 0, d, d, 180, 90);
+            p.AddArc(size.Width - d, 0, d, d, 270, 90);
+            p.AddArc(size.Width - d, size.Height - d, d, d, 0, 90);
+            p.AddArc(0, size.Height - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        public static GraphicsPath RoundedPath(Rectangle r, int radius)
+        {
+            GraphicsPath p = new GraphicsPath();
+            int d = radius * 2;
+            p.AddArc(r.Left, r.Top, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+    }
+
+    // Small self-painted pieces. Doing these by hand is what stops the panel
+    // looking like a stack of grey WinForms rectangles.
+    internal sealed class PaintDot : Control
+    {
+        public Color DotColor = Skin.Good;
+        public bool Breathe;
+        public int Phase;
+
+        public PaintDot()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                | ControlStyles.OptimizedDoubleBuffer, true);
+            // Not BackColor.Transparent: a custom-painted control with that
+            // back colour throws "not a valid owner window handle" unless it is
+            // parented first. Transparent-back-colour comes from the parent at
+            // paint time instead, which is what we want anyway.
+            Size = new Size(12, 12);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            float scale = 1F;
+            if (Breathe)
+            {
+                // 3 -> 5 -> 6 -> 5, a calm breathing ring rather than a blink.
+                int[] radii = { 4, 5, 6, 5 };
+                scale = radii[Phase % 4] / 4F;
+            }
+            float cx = Width / 2F, cy = Height / 2F;
+            float r = 3.2F * scale;
+            if (scale > 1.05F)
+            {
+                using (Pen halo = new Pen(Color.FromArgb(70, DotColor)))
+                {
+                    halo.Width = 1.6F;
+                    g.DrawEllipse(halo, cx - r - 2.2F, cy - r - 2.2F, (r + 2.2F) * 2, (r + 2.2F) * 2);
+                }
+            }
+            using (SolidBrush b = new SolidBrush(DotColor))
+            {
+                g.FillEllipse(b, cx - r, cy - r, r * 2, r * 2);
+            }
+        }
+    }
+
+    internal sealed class PaintText : Control
+    {
+        public string Caption = "";
+        public Color InkColor = Skin.InkSoft;
+        public Font TextFont = Skin.UiSmall;
+        public ContentAlignment Align = ContentAlignment.MiddleLeft;
+
+        public PaintText()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            // Graphics.DrawString wants a StringFormat, not TextFormatFlags.
+            using (StringFormat f = new StringFormat())
+            {
+                f.Alignment = Align == ContentAlignment.MiddleCenter
+                    ? StringAlignment.Center
+                    : Align == ContentAlignment.MiddleRight
+                        ? StringAlignment.Far
+                        : StringAlignment.Near;
+                f.LineAlignment = StringAlignment.Center;
+                f.FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+                f.Trimming = StringTrimming.EllipsisCharacter;
+                using (SolidBrush b = new SolidBrush(InkColor))
+                {
+                    e.Graphics.DrawString(Caption, TextFont, b,
+                        new RectangleF(0, 0, Width, Height), f);
+                }
+            }
+        }
+
+        public void Set(string text, Color color)
+        {
+            Caption = text;
+            InkColor = color;
+            Invalidate();
+        }
+    }
+
+    // A rounded card with an optional left accent bar.
+    internal sealed class PaintCard : Control
+    {
+        public Color Fill = Skin.Field;
+        public int Corner = 8;
+        public Color? Accent = null;
+
+        public PaintCard()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath path = Skin.RoundedPath(r, Corner))
+            using (SolidBrush b = new SolidBrush(Fill))
+            {
+                g.FillPath(b, path);
+            }
+            if (Accent.HasValue)
+            {
+                using (SolidBrush b = new SolidBrush(Accent.Value))
+                using (GraphicsPath bar = Skin.RoundedPath(
+                    new Rectangle(0, 0, 3, Height - 1), 2))
+                {
+                    g.FillPath(b, bar);
+                }
+            }
+        }
+    }
+
+    // A flat button that paints its own rounded shape and hover states.
+    internal sealed class SoftButton : Button
+    {
+        public Color Fill = Skin.Field;
+        public Color Hover = Color.FromArgb(232, 235, 241);
+        public Color Ink = Skin.Ink;
+        public int Corner = 7;
+        public bool Primary;
+
+        public SoftButton()
+        {
+            FlatStyle = FlatStyle.Flat;
+            UseVisualStyleBackColor = false;
+            FlatAppearance.BorderSize = 0;
+SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            bool hot = Enabled && IsDefault;
+            Color fill = Primary ? (hot ? Skin.Accent : Skin.Accent)
+                : (hot ? Hover : Fill);
+            Color ink = Primary ? Color.White : Ink;
+
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath p = Skin.RoundedPath(r, Corner))
+            using (SolidBrush b = new SolidBrush(fill))
+            {
+                g.FillPath(b, p);
+            }
+            // Graphics.DrawString needs a StringFormat rather than TextFormatFlags.
+            using (StringFormat f = new StringFormat())
+            {
+                f.Alignment = StringAlignment.Center;
+                f.LineAlignment = StringAlignment.Center;
+                f.FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+                f.Trimming = StringTrimming.EllipsisCharacter;
+                using (SolidBrush b = new SolidBrush(Enabled ? ink : Skin.InkFaint))
+                {
+                    g.DrawString(Text, Font, b, new RectangleF(r.X, r.Y, r.Width, r.Height), f);
+                }
+            }
+        }
+    }
+
     internal sealed class MainForm : Form
     {
         private readonly Bridge _bridge;
         private readonly string _url;
         private readonly HotkeyWindow _hotkeys;
         private readonly System.Windows.Forms.Timer _timer;
+        private readonly System.Windows.Forms.Timer _pulse;
 
         // Not readonly: these are built by BuildUi, which is called from the
         // constructor but is not itself one.
@@ -1358,7 +1598,7 @@ namespace DictationBridge
         private Button _toggle;
         private Button _collapse;
         private Button _setHotkey;
-        private Label _hotkeyLabel;
+        private PaintText _hotkeyLabel;
         private CheckBox _flushBox;
         private TextBox _lastText;
         private ListBox _bufferList;
@@ -1368,10 +1608,15 @@ namespace DictationBridge
         private bool _dragging;
         private bool _expanded;
         private bool _suppressFlushEvent;
+        private int _pulsePhase;
+        private PaintDot _lamp;
+        private PaintText _phoneState;
+        private PaintCard _lastCard;
+        private Label _listHeader;
 
         // One place that owns the sizes, so expand and collapse cannot disagree.
-        private static readonly Size CollapsedSize = new Size(270, 46);
-        private static readonly Size ExpandedSize = new Size(270, 320);
+        private static readonly Size CollapsedSize = new Size(320, 56);
+        private static readonly Size ExpandedSize = new Size(320, 430);
         private const string PositionFile = "dictation-bridge-position.txt";
 
         public MainForm(Bridge bridge, string url, HotkeyWindow hotkeys)
@@ -1391,9 +1636,9 @@ namespace DictationBridge
             MaximumSize = ExpandedSize;
             AutoSize = false;
             StartPosition = FormStartPosition.Manual;
-            BackColor = Color.FromArgb(22, 24, 28);
-            ForeColor = Color.FromArgb(232, 234, 237);
-            Font = new Font("Segoe UI", 9F);
+            BackColor = Skin.Surface;
+            ForeColor = Skin.Ink;
+            Font = Skin.Ui;
             TopMost = true;
             ShowInTaskbar = false;
             MinimizeBox = false;
@@ -1433,7 +1678,23 @@ namespace DictationBridge
             _timer = new System.Windows.Forms.Timer { Interval = 700 };
             _timer.Tick += (s, e) => Refresh2();
             _timer.Start();
-            FormClosed += (s, e) => { _timer.Stop(); SavePosition(); };
+
+            // A slow breath on the armed dot, so it is obvious at a glance that
+            // the app is listening without needing to read anything.
+            _pulse = new System.Windows.Forms.Timer { Interval = 900 };
+            _pulse.Tick += (s, e) =>
+            {
+                _pulsePhase = (_pulsePhase + 1) % 4;
+                if (_lamp != null) _lamp.Invalidate();
+            };
+            _pulse.Start();
+
+            FormClosed += (s, e) =>
+            {
+                _timer.Stop();
+                _pulse.Stop();
+                SavePosition();
+            };
             LoadPosition();
             Refresh2();
         }
@@ -1497,82 +1758,131 @@ namespace DictationBridge
             catch (Exception) { }
         }
 
-        private void BuildUi(Control host)
+private void BuildUi(Control host)
         {
             _body = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(22, 24, 28),
-                Padding = new Padding(10, 8, 10, 10)
+                BackColor = Skin.Surface,
+                Padding = new Padding(2)
             };
 
+            // ---- the strip -------------------------------------------------
             _strip = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 28,
-                BackColor = Color.FromArgb(22, 24, 28)
+                Height = 48,
+                BackColor = Skin.Surface
             };
 
-            _toggle = new Button
+            _toggle = new SoftButton
             {
                 Dock = DockStyle.Left,
-                Width = 104,
-                Height = 26,
-                FlatStyle = FlatStyle.Flat,
-                UseVisualStyleBackColor = false,
-                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-                Text = "DISARMED"
+                Width = 118,
+                Height = 30,
+                Text = "DISARMED",
+                Font = Skin.Badge,
+                Corner = 8
             };
-            _toggle.FlatAppearance.BorderSize = 0;
-            _toggle.FlatAppearance.MouseOverBackColor = Color.FromArgb(60, 64, 67);
             _toggle.Click += (s, e) => _bridge.SetArmed(!_bridge.Armed);
 
-            _status = new Label
-            {
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font("Segoe UI", 8F)
-            };
-
-            _collapse = new Button
+            _collapse = new SoftButton
             {
                 Dock = DockStyle.Right,
-                Width = 24,
-                Height = 26,
-                FlatStyle = FlatStyle.Flat,
-                UseVisualStyleBackColor = false,
-                Text = "_",
-                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-                ForeColor = Color.FromArgb(154, 160, 166)
+                Width = 28,
+                Height = 30,
+                Text = "+",
+                Font = new Font("Segoe UI", 11F),
+                Ink = Skin.InkSoft,
+                Corner = 8
             };
-            _collapse.FlatAppearance.BorderSize = 0;
             _collapse.Click += (s, e) => SetExpanded(!_expanded);
 
-            _strip.Controls.Add(_status);
-            _strip.Controls.Add(_toggle);
-            _strip.Controls.Add(_collapse);
+            var stripPad = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Skin.Surface
+            };
 
+            _lamp = new PaintDot
+            {
+                Location = new Point(12, 18),
+                Size = new Size(12, 12)
+            };
+
+            _phoneState = new PaintText
+            {
+                Location = new Point(30, 9),
+                Size = new Size(104, 24),
+                TextFont = Skin.UiSmall,
+                InkColor = Skin.InkSoft,
+                Align = ContentAlignment.MiddleLeft
+            };
+
+            stripPad.Controls.Add(_phoneState);
+            stripPad.Controls.Add(_lamp);
+
+            _strip.Controls.Add(stripPad);
+            _strip.Controls.Add(_collapse);
+            _strip.Controls.Add(_toggle);
+            stripPad.BringToFront();
+
+            // ---- everything below the strip --------------------------------
             _detail = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(22, 24, 28)
+                BackColor = Skin.Surface,
+                Padding = new Padding(14, 4, 14, 10)
             };
 
-            var phoneRow = new Panel { Dock = DockStyle.Top, Height = 18 };
+            // Address, on a soft card so it reads as a field rather than a link.
+            var urlCard = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 42,
+                BackColor = Skin.Surface
+            };
+            var urlBg = new PaintCard
+            {
+                Dock = DockStyle.Fill,
+                Fill = Skin.Field,
+                Corner = 8
+            };
             _urlLink = new LinkLabel
             {
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleCenter,
                 AutoSize = false,
-                Font = new Font("Segoe UI", 8F),
-                LinkColor = Color.FromArgb(138, 180, 248),
-                ActiveLinkColor = Color.FromArgb(138, 180, 248)
+                Font = Skin.UiSmall,
+                LinkColor = Skin.Accent,
+                ActiveLinkColor = Skin.Accent,
+                BackColor = Color.Transparent
             };
             _urlLink.Text = _url;
             _urlLink.LinkClicked += (s, e) => Copy(_url);
-            phoneRow.Controls.Add(_urlLink);
+            urlCard.Controls.Add(_urlLink);
+            urlCard.Controls.Add(urlBg);
+            urlBg.SendToBack();
 
-            var lastRow = new Panel { Dock = DockStyle.Top, Height = 34, Padding = new Padding(0, 2, 0, 2) };
+            // Last typed utterance, shown as a quote with an accent bar.
+            var lastRow = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 58,
+                BackColor = Skin.Surface,
+                Padding = new Padding(0, 6, 0, 6)
+            };
+            // Only the left accent bar is painted; the fill belongs to the
+            // TextBox, which sits on top of it.
+            _lastCard = new PaintCard
+            {
+                Dock = DockStyle.Fill,
+                Fill = Color.Transparent,
+                Corner = 0,
+                Accent = Skin.Accent
+            };
+            // A read-only TextBox cannot take Color.Transparent either, so the card
+            // behind it carries the colour instead.
             _lastText = new TextBox
             {
                 Dock = DockStyle.Fill,
@@ -1580,60 +1890,70 @@ namespace DictationBridge
                 ReadOnly = true,
                 ScrollBars = ScrollBars.None,
                 BorderStyle = BorderStyle.None,
-                BackColor = Color.FromArgb(30, 33, 38),
-                ForeColor = Color.FromArgb(138, 180, 248),
-                Font = new Font("Segoe UI", 9F),
-                TextAlign = HorizontalAlignment.Center
+                BackColor = Skin.AccentSoft,
+                ForeColor = Skin.Ink,
+                Font = Skin.Quote,
+                TextAlign = HorizontalAlignment.Left,
+                Margin = new Padding(9, 3, 9, 3)
             };
             lastRow.Controls.Add(_lastText);
+            lastRow.Controls.Add(_lastCard);
+            _lastCard.SendToBack();
+
+            _listHeader = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 20,
+                Text = "WAITING TO TYPE",
+                Font = Skin.UiTiny,
+                ForeColor = Skin.InkFaint,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
 
             _bufferList = new ListBox
             {
                 Dock = DockStyle.Fill,
                 BorderStyle = BorderStyle.None,
-                BackColor = Color.FromArgb(30, 33, 38),
-                ForeColor = Color.FromArgb(232, 234, 237),
+                BackColor = Skin.Page,
+                ForeColor = Skin.Ink,
                 IntegralHeight = false,
-                Font = new Font("Segoe UI", 8F)
+                Font = Skin.UiSmall
             };
 
-            var listWrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 2, 0, 2) };
+            var listWrap = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Skin.Page,
+                Padding = new Padding(1)
+            };
             listWrap.Controls.Add(_bufferList);
 
-            var listLabel = new Label
-            {
-                Dock = DockStyle.Top,
-                Height = 15,
-                Text = "BUFFERED - typed when you arm",
-                Font = new Font("Segoe UI", 7F, FontStyle.Bold),
-                ForeColor = Color.FromArgb(128, 134, 139)
-            };
-
-var bottom = new TableLayoutPanel
+            // ---- footer ----------------------------------------------------
+            var bottom = new TableLayoutPanel
             {
                 Dock = DockStyle.Bottom,
-                Height = 104,
-                BackColor = Color.FromArgb(22, 24, 28),
+                Height = 118,
+                BackColor = Skin.Surface,
                 ColumnCount = 2,
-                RowCount = 4,
-                Padding = new Padding(0, 4, 0, 0)
+                RowCount = 4
             };
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            for (int i = 0; i < 4; i++)
-            {
-                bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
-            }
-            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 22F));
+            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 20F));
+            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
+            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
 
             _flushBox = new CheckBox
             {
-                Text = "Buffer while disarmed",
+                Text = "Hold speech until armed",
                 Checked = true,
                 AutoSize = true,
                 Dock = DockStyle.Fill,
-                Font = new Font("Segoe UI", 8F),
-                FlatStyle = FlatStyle.Flat
+                Font = Skin.UiSmall,
+                ForeColor = Skin.InkSoft,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.Transparent
             };
             _flushBox.FlatAppearance.BorderSize = 0;
             _flushBox.CheckedChanged += (s, e) =>
@@ -1645,22 +1965,21 @@ var bottom = new TableLayoutPanel
                     : "mode: drop while disarmed");
             };
 
-            _hotkeyLabel = new Label
+            _hotkeyLabel = new PaintText
             {
-                Text = "Hotkey: " + _hotkeys.Combination,
                 Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Font = new Font("Segoe UI", 8F),
-                ForeColor = Color.FromArgb(154, 160, 166),
-                AutoEllipsis = true
+                TextFont = Skin.UiTiny,
+                InkColor = Skin.InkFaint,
+                Align = ContentAlignment.MiddleLeft
             };
 
-            _setHotkey = FlatButton("Change hotkey", (s, e) => Rebind());
-            var clearButton = FlatButton("Clear buffer", (s, e) => _bridge.ClearBuffer());
-            var copyButton = FlatButton("Copy address", (s, e) => Copy(_url));
-            // Close() alone would be swallowed by the hide-to-tray handler, so quitting is
-// routed back to the tray context which knows how to really exit.
-var quitButton = FlatButton("Quit", (s, e) => Quit());
+            _setHotkey = SoftButtonOf("Change hotkey", (s, e) => Rebind());
+            var clearButton = SoftButtonOf("Clear queue", (s, e) => _bridge.ClearBuffer());
+            var copyButton = SoftButtonOf("Copy address", (s, e) => Copy(_url));
+            // Close() alone is swallowed by hide-to-tray, so quit is routed back
+            // to the tray context which knows how to really exit.
+            var quitButton = SoftButtonOf("Quit", (s, e) => Quit());
+            quitButton.Ink = Skin.Danger;
 
             bottom.Controls.Add(_flushBox, 0, 0);
             bottom.SetColumnSpan(_flushBox, 2);
@@ -1675,10 +1994,10 @@ var quitButton = FlatButton("Quit", (s, e) => Quit());
             // bottom bar to _body instead left its buttons drawn on top of the
             // collapsed strip, where they swallowed clicks aimed for "+".
             _detail.Controls.Add(listWrap);
-            _detail.Controls.Add(listLabel);
-            _detail.Controls.Add(lastRow);
-            _detail.Controls.Add(phoneRow);
+            _detail.Controls.Add(_listHeader);
             _detail.Controls.Add(bottom);
+            _detail.Controls.Add(lastRow);
+            _detail.Controls.Add(urlCard);
 
             _body.Controls.Add(_detail);
             _body.Controls.Add(_strip);
@@ -1686,28 +2005,22 @@ var quitButton = FlatButton("Quit", (s, e) => Quit());
             host.Controls.Add(_body);
             SetExpanded(false);
 
-            // Drag anywhere on the strip or the padding.
             MakeDraggable(_strip);
             MakeDraggable(_body);
             MakeDraggable(_detail);
-            MakeDraggable(_status);
-            _status.MouseDoubleClick += (s, e) => SetExpanded(!_expanded);
+            MakeDraggable(stripPad);
+            _phoneState.MouseDoubleClick += (s, e) => SetExpanded(!_expanded);
         }
 
-        private static Button FlatButton(string text, EventHandler onClick)
+        private static SoftButton SoftButtonOf(string text, EventHandler onClick)
         {
-            var b = new Button
+            var b = new SoftButton
             {
                 Text = text,
                 Dock = DockStyle.Fill,
-                FlatStyle = FlatStyle.Flat,
-                UseVisualStyleBackColor = false,
-                Font = new Font("Segoe UI", 8F),
-                BackColor = Color.FromArgb(45, 49, 56),
-                ForeColor = Color.FromArgb(232, 234, 237),
-                Margin = new Padding(2)
+                Font = Skin.UiSmall,
+                Margin = new Padding(0, 3, 5, 3)
             };
-            b.FlatAppearance.BorderSize = 0;
             b.Click += onClick;
             return b;
         }
@@ -1813,22 +2126,43 @@ var quitButton = FlatButton("Quit", (s, e) => Quit());
             bool present = _bridge.PhonePresent;
             int buffered = _bridge.Buffered;
 
-            _toggle.Text = armed ? "ARMED" : "DISARMED";
-            _toggle.BackColor = armed
-                ? Color.FromArgb(26, 115, 232)
-                : Color.FromArgb(52, 56, 62);
-            _toggle.ForeColor = armed ? Color.White : Color.FromArgb(154, 160, 166);
+            var toggle = _toggle as SoftButton;
+            if (toggle != null)
+            {
+                toggle.Primary = armed;
+                toggle.Text = armed ? "LISTENING" : "PAUSED";
+                toggle.Invalidate();
+            }
 
-            if (present) _status.Text = "phone ok";
-            else _status.Text = "no phone";
-            _status.ForeColor = present
-                ? Color.FromArgb(52, 168, 83)
-                : Color.FromArgb(249, 171, 0);
+            if (_lamp != null)
+            {
+                _lamp.DotColor = armed ? Skin.Accent : Skin.InkFaint;
+                _lamp.Breathe = armed;
+                _lamp.Phase = _pulsePhase;
+                _lamp.Invalidate();
+            }
 
-            _setHotkey.Text = "Change hotkey";
-            _hotkeyLabel.Text = "Hotkey: " + _hotkeys.Combination;
+            if (_phoneState != null)
+            {
+                if (armed && !present) _phoneState.Set("waiting for phone", Skin.Warn);
+                else if (present) _phoneState.Set("phone ready", Skin.Good);
+                else _phoneState.Set("no phone", Skin.Warn);
+            }
+
+            if (_hotkeyLabel != null)
+            {
+                _hotkeyLabel.Caption = "HOTKEY   " + _hotkeys.Combination;
+                _hotkeyLabel.Invalidate();
+            }
 
             _lastText.Text = _bridge.LastText;
+            if (_lastCard != null)
+            {
+                bool hasText = !string.IsNullOrEmpty(_bridge.LastText);
+                _lastCard.Accent = hasText ? Skin.Accent : (Color?)null;
+                _lastCard.Invalidate();
+                _lastText.BackColor = hasText ? Skin.AccentSoft : Skin.Field;
+            }
 
             if (_bufferList.Items.Count != buffered)
             {
@@ -1838,6 +2172,10 @@ var quitButton = FlatButton("Quit", (s, e) => Quit());
                 _bufferList.EndUpdate();
                 if (buffered > 0) _bufferList.TopIndex = _bufferList.Items.Count - 1;
             }
+            _listHeader.Text = buffered == 0
+                ? "WAITING TO TYPE"
+                : "QUEUED   " + buffered + (_bridge.WordCount > 0
+                    ? "   " + _bridge.WordCount + " words" : "");
         }
     }
 
