@@ -11,10 +11,6 @@ press one key on the PC, and speak.
   <img src="docs/panel-collapsed.png" width="320" alt="The panel collapsed to a single strip">
 </p>
 
-<p align="center">
-  <img src="docs/phone-page.png" width="240" alt="The page on the phone">
-</p>
-
 Languages: [English](README.md) · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
 
 ---

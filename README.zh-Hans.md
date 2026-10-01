@@ -10,10 +10,6 @@
   <img src="docs/panel-collapsed.png" width="320" alt="收起时只剩一条状态条">
 </p>
 
-<p align="center">
-  <img src="docs/phone-page.png" width="240" alt="手机上的页面">
-</p>
-
 语言版本：[English](README.md) · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
 
 ---
