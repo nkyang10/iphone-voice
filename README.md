@@ -1,183 +1,191 @@
 # Dictation Bridge
 
-Talk on your iPhone, and the words appear in whatever window your Windows PC has focused.
+**Talk on your iPhone. The words appear in whatever window your Windows PC has focused.**
 
-The phone listens with the Web Speech API and posts each finished utterance to a small
-desktop app, which types it using `SendInput`. A global hotkey decides whether that
-typing actually happens, so the phone is a set-and-forget device after the first tap.
+No typing, no leaning over the keyboard, no stopping what you're doing. Hold the phone,
+press one key on the PC, and speak.
 
-Nothing leaves your network. Recognition audio goes to Apple (that is how Safari works);
-the resulting text goes only to your own PC.
+![The Dictation Bridge panel](docs/panel-expanded.png)
+
+<p align="center">
+  <img src="docs/panel-collapsed.png" width="320" alt="The panel collapsed to a single strip">
+</p>
+
+<p align="center">
+  <img src="docs/phone-page.png" width="240" alt="The page on the phone">
+</p>
 
 Languages: [English](README.md) · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
 
-![The Windows panel, expanded and armed](docs/panel-expanded.png)
+---
 
-The panel above, expanded and armed. Collapsed it is a single strip:
+## Get started
 
-![The collapsed strip](docs/panel-collapsed.png)
+**1. On the PC**
 
-And the page on the phone:
+Download `DictationBridge.exe` and run it. That's the whole installation — no installer,
+no runtime, no setup. A small panel appears near the middle of your screen.
 
-![The dictation page](docs/phone-page.png)
+**2. On the phone**
+
+Open the address the panel shows you. It looks like `https://192.168.1.162:8080/`.
+
+The phone will ask you to install a certificate. Tap through it, then come back. This
+happens **once**, and the detailed steps are in
+[Setting up the phone](#setting-up-the-phone) below.
+
+**3. Tap Start listening**
+
+Allow the microphone if you're asked. From here on, the phone needs nothing from you.
+
+**4. Talk**
+
+Press **Ctrl+Alt+D** on the PC so the panel says **LISTENING**, and start speaking. Your
+words are typed into whatever you're working in. Press Ctrl+Alt+D again to pause.
+
+That's it. You can put the phone down and forget about it.
+
+## The one thing to understand
+
+The panel starts **PAUSED**, and it will not type anything until you press the key.
+
+That's on purpose. If it typed the moment it started, a restart could dump words into
+whatever window happened to be open. Instead, while it's paused, your speech is quietly
+**queued** and typed the instant you press play. The queue is visible in the panel, so
+nothing is ever lost.
+
+## Everyday use
+
+| | |
+| --- | --- |
+| Start / stop typing | **Ctrl+Alt+D**, or click the panel button |
+| See the panel again | Click the tray icon |
+| Move the panel | Drag it. It remembers where you left it |
+| Change the shortcut | Expand the panel, press **Change hotkey**, press a new combination |
+| See what you said last | Shown in the panel as soon as it arrives |
+| If the port is taken | Run `DictationBridge.exe --port 8099` |
+
+You can also click the pause button instead of using the keyboard, if you'd rather not
+reach for a key.
+
+### Speaking Cantonese or Chinese
+
+Pick your language from the dropdown on the phone page. Cantonese is the default.
+
+If your iPhone rejects a language, the page quietly tries the next one and shows you
+which it settled on. Cantonese is tried as `zh-HK` first, then `yue-HK`, then `zh-TW`.
+
+> **Tip:** your phone's own dictation language setting affects results. If Cantonese comes
+> out as Mandarin, set Settings > General > Keyboard > Dictation to Cantonese.
+
+### Auto-Lock
+
+Set Settings > Display & Brightness > Auto-Lock to **Never**.
+
+If the phone screen locks, the page is suspended and stops listening. This is the one
+setting worth changing.
+
+## What it looks like in use
+
+The panel collapsed to a single strip, paused, with two utterances waiting:
+
+<p align="center">
+  <img src="docs/panel-collapsed.png" width="320" alt="Collapsed panel with queued speech">
+</p>
 
 ## Files it creates
 
-Everything lands in a `data\` folder next to the exe, created on first run. The exe
-itself is never modified.
+Everything lands in a `data\` folder next to the exe, created on first run. The exe itself
+is never modified. You can delete the whole folder to reset everything, including the
+certificate.
 
-| File | What it is |
-| --- | --- |
-| `dictation-bridge.cer` | The certificate to install on the phone. Public only, no private key. |
-| `dictation-bridge.pfx` | Same certificate with its private key. Needed to serve HTTPS. |
-| `dictation-bridge.log` | What the desktop is doing. |
-| `diagnostics.log` | Reports from the phone. Rotates to `diagnostics.log.1` at 4 MB. |
-| `dictation-bridge-hotkey.txt` | The shortcut you chose. |
-| `dictation-bridge-position.txt` | Where you left the panel. |
+Only one file matters to you: **`data\dictation-bridge.cer`**, the certificate to install
+on the phone. The app prints its full path when it starts.
 
-Delete the whole folder to reset everything, including the certificate. Do **not**
-delete it while the app is running.
+## Privacy
 
-## Using it
+Your speech is transcribed by **Apple**, because that's how Safari's dictation works. The
+text is sent to your own PC over your own network. Nothing is sent to us, or anywhere
+else.
 
-1. Run `DictationBridge.exe`. A floating panel appears, plus a tray icon.
-2. Open the address it shows on your phone, e.g. `https://192.168.1.162:8080/`.
-3. Tap **Start listening** once. Allow the microphone if asked.
-4. From then on, talk. Press **Ctrl+Alt+D** on the PC to start and stop typing.
+One honest caveat: anyone on the same network who learns the session token can type into
+your focused window. On a home network that's fine. On shared or public WiFi, be aware of
+it.
 
-The panel is red and says `DISARMED` until you arm it. That is deliberate: the app
-starts disarmed so restarting it can never type into whatever window happens to be
-focused. While disarmed, speech is buffered and typed the moment you arm.
+## Known limits
 
-### First-run certificate
+- The phone screen must stay on and unlocked.
+- It cannot type into a program running as **administrator**. Windows blocks synthetic
+  input across privilege levels, and the log says so when it happens.
+- If your PC's IP address changes to one the certificate doesn't list, you'll reinstall
+  the certificate once more. Usually rare, since most networks reissue the same address.
+- You need iOS 14.5 or newer. Chrome and Firefox on iOS work in theory, but Safari is
+  what this was tested with.
 
-iOS only exposes speech recognition on a secure page, so the app serves HTTPS with a
-self-signed certificate. Safari on iOS has no "proceed anyway" button the way macOS
-Safari does, so the certificate has to be installed once:
+## Setting up the phone
 
-1. Send `dictation-bridge.cer` to the phone and tap it.
-2. Settings > General > VPN & Device Management > tap the profile > Install.
-3. Settings > General > About > Certificate Trust Settings > enable it.
-4. Open the address from step 2.
+iOS only allows voice dictation on a secure page, and its version of Safari has no
+"proceed anyway" button. So the desktop runs a small HTTPS server and you trust its
+certificate once.
 
-**You only do this once.** The desktop keeps its certificate between runs and reuses
-it, so restarting the app or rebooting the PC never needs a reinstall.
+**Send the certificate to the phone.** It's at `data\dictation-bridge.cer`; the app prints
+the exact path on startup. AirDrop it, email it, or copy it however you like. Tap it on
+the phone.
 
-The file to install is `data\dictation-bridge.cer`, and the app prints its full path on
-startup. The certificate also covers the name `dictation-bridge.local`. If the phone
-can resolve that, use `https://dictation-bridge.local:8080/` instead of the IP and the
-same certificate keeps working on **any** network, even a different address. It does not
-resolve everywhere, so treat the IP as the reliable route and the name as a bonus.
+**Install it:**
 
-If the address changes to one the certificate does not list, the desktop logs
-`issuing a new one` and the phone will need the new `dictation-bridge.cer` installed
-again. That is the only case that asks you to repeat this.
+1. **Settings > General > VPN & Device Management**
+2. Tap the Dictation Bridge profile
+3. Tap **Install**
 
-## Why iOS needs any of this
+**Then give it permission.** This second step is the one people miss, and the app will
+appear broken without it:
 
-`SpeechRecognition` is `[SecureContext]`-gated. On a plain `http://` page Safari does not
-expose the API at all, and there is no error to click past: the page simply reports no
-speech recognition support. The certificate exists to get past that gate, not to
-authenticate anything.
+4. **Settings > General > About > Certificate Trust Settings**
+5. Switch on **Dictation Bridge**
 
-Two further constraints shaped the design:
+**Open the page** at the address the panel shows.
 
-- **The first `start()` needs a tap** (that is how iOS triggers the microphone prompt).
-  Restarts afterwards come from the recognizer's own `onend` handler.
-- **Safari ends a session after silence.** The app re-arms automatically. If your iOS
-  version instead requires a tap for *every* start, the timer-driven restarts will fail
-  silently; the diagnostics report records a `gesture=true/false` flag on each `start()`
-  so you can tell which case you are in.
+### It keeps working
 
-## Requirements
+The desktop holds onto its certificate between runs, so rebooting your PC or restarting
+the app never asks you to do this again.
 
-- Windows 10 or later, x64. Nothing to install: the exe references only assemblies that
-  ship with Windows since .NET 4.0.
-- iPhone or iPad with iOS 14.5 or newer, using Safari. Chrome and Firefox on iOS are
-  WebKit underneath and behave the same, but Safari is the tested path.
-- Same network. The phone reaches the PC over your LAN.
+The certificate also covers the name `dictation-bridge.local`. If your phone can resolve
+it, you can use `https://dictation-bridge.local:8080/` instead of the IP address and the
+same certificate will keep working on **any** network. It doesn't resolve everywhere, so
+treat the IP as the reliable option and the name as a bonus.
 
-## The floating panel
+## When something goes wrong
 
-A small always-on-top panel, shaped like the floating helpers people already keep beside
-their work. It has a one-line status strip and expands to show everything.
+**The page says it has no speech recognition.**
+The certificate isn't trusted. Go back to step 4 above, and check you're opening `https://`
+and not `http://`.
 
-Strip: an **ARMED / DISARMED** button you can click, whether the phone is connected, and
-a `+` / `-` to expand. Drag anywhere on it to move it. It opens centred, remembers where
-you put it, and refuses to sit somewhere you can no longer reach. No taskbar button;
-close it to hide to the tray, where the same controls are mirrored.
+**It works, then goes quiet after you stop talking for a while.**
+Press Ctrl+Alt+D once. If that wakes it up, your iOS wants a tap for every restart rather
+than restarting on its own. Tell me and I'll add a "tap to resume" button.
 
-Expanded it adds the phone address, the last thing typed, the buffer list, and buttons to
-rebind the hotkey, clear the buffer, copy the address, and quit.
+**The page shows your words but nothing gets typed.**
+Check the panel says **LISTENING**, and that you haven't pressed the hotkey twice.
 
-### Changing the hotkey
+**Nothing appears in the target program.**
+Check it isn't running as administrator. Open `data\dictation-bridge.log` — it will say
+`SendInput sent 0/44` if that's the problem.
 
-**Ctrl+Alt+D** by default. Click the hotkey button in the expanded panel, press the
-combination you want, and it takes effect immediately. The choice is saved in
-`dictation-bridge-hotkey.txt` next to the exe and restored on restart. F12 is refused
-because Windows reserves it for the debugger. If a combination is already claimed by
-another app the bind is rejected, the old one is restored, and the panel says so.
+**The address changed and the certificate was replaced.**
+The panel will show a new address. Send the new `data\dictation-bridge.cer` to the phone
+and install it again.
 
-Change the port with `DictationBridge.exe --port 8099` if something else already owns 8080.
+**Still stuck.** Open `data\diagnostics.log`. On the phone page, tap **Send to desktop**
+and the log will tell us exactly what the recogniser was doing. It records events and
+error codes, not what you said, unless you tick *include spoken words*.
 
-## Diagnostics
+## For developers
 
-The phone records every recognizer event with a timestamp and can post it to
-`diagnostics.log` next to the exe. Nothing leaves your machine and there is no account
-or service involved.
-
-On the phone page, **Send to desktop** uploads the current report. It also sends
-automatically when recognition fails without producing anything, so a bug that only
-reproduces on hardware still leaves a trace.
-
-**Include spoken words in the report** is off by default. Diagnostics record that
-recognition failed without recording what you said; enable it only if you want the actual
-text.
-
-`diagnostics.log` is capped at 4 MB and rolls to `diagnostics.log.1`.
-
-## Troubleshooting
-
-**The page says it has no speech recognition.** The certificate is not trusted. Check
-Certificate Trust Settings, and confirm you are on `https://`, not `http://`.
-
-**It works, then goes quiet after idling.** Look at `diagnostics.log` for the
-`gesture=false` entries. If every timer-driven restart is marked that way and is
-followed by `startThrew`, your iOS needs a tap for each start.
-
-**Nothing arrives, but the page transcript fills.** Recognition works and transport does
-not. The status line names the port it tried.
-
-**The certificate keeps changing.** It regenerates when your PC's IP address is not in
-the certificate's SAN. Reinstall the new `.cer`. Usually harmless, because DHCP tends to
-reissue the same address.
-
-**Nothing types.** Check the target app is not running as administrator: `SendInput`
-cannot inject into an elevated window, and the log says so explicitly.
-
-**The page suspends.** A locked iPhone screen stops the page. Set Auto-Lock to Never.
-
-## Known limitations
-
-- Screen must stay unlocked; Auto-Lock to Never.
-- Cannot type into an elevated (administrator) window.
-- Reinstalling the certificate is required if the PC's address changes.
-- Cantonese uses `zh-HK`, falling back to `yue-HK`, `zh-TW`, then `en-US` if the device
-  rejects one. The page shows which tag was accepted.
-- Anyone on the same network who learns the token can type into your focused window.
-  Fine for a home LAN, not a shared one.
-
-## Building
-
-```powershell
-.\build.ps1
-```
-
-Compiles with the `csc.exe` that ships in `Microsoft.NET\Framework64`, so there is no
-SDK to install and no network access needed. The web page is embedded as a resource, so
-the exe is a single self-contained file; a copy is also written next to it for editing.
-
-Edit `web/index.html` and rebuild. See `AGENTS.md` for the project conventions.
+Build with `.\build.ps1`. It uses the C# compiler that ships with Windows, so there is no
+SDK to install. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to verify a change, and
+[AGENTS.md](AGENTS.md) for the conventions and the traps.
 
 ## License
 

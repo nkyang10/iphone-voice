@@ -2,6 +2,10 @@
 
 Notes for working in this repository. Read this before changing code.
 
+`README.md` is written for people who want to use the app, not to build it. Keep it that
+way: setup steps, the certificate dance, troubleshooting, limits. Anything that only
+matters to someone editing the code belongs here instead.
+
 ## What this is
 
 An iOS Safari page captures dictation with the Web Speech API and POSTs each finished
@@ -12,6 +16,9 @@ Two halves, one repo:
 
 - `web/index.html` — the page. No build step, no dependencies, no framework.
 - `desktop/DictationBridge.cs` — the desktop app. Single C# file, compiled by `csc.exe`.
+
+The app is distributed as a single self-contained exe. Anyone can run it; they should never
+need to read this file.
 
 ## Build
 
@@ -28,6 +35,13 @@ silently loses the embedded page and falls back to reading a file from disk.
 
 The language level is **C# 5**. No interpolated strings, no `out var`, no expression
 bodied members, no pattern matching, no tuples. `csc.exe` 4.0 rejects them.
+
+**No test framework.** There is none and adding one is not worth it at this size. Verify by
+running things, and by driving real Chrome over the DevTools Protocol with
+`--headless=new --ignore-certificate-errors --remote-debugging-port=9333`. Stub
+`window.SpeechRecognition` before the page script runs to exercise language fallback and
+the idle-then-speak path. Never test with a hand-rolled WebSocket client: it trims header
+values that a browser takes verbatim, so it will pass where Safari fails.
 
 ## Language split
 
@@ -131,9 +145,6 @@ and installing that root on a user's PC is not this app's decision to make. iOS 
 
 ## Testing
 
-There is no test framework, and adding one is not worth it at this size. Verify by
-running things:
-
 ```powershell
 # does it build and start
 .\build.ps1
@@ -142,12 +153,6 @@ running things:
 # do the endpoints behave
 node -e "const https=require('https');https.get({host:'127.0.0.1',port:8099,path:'/config',rejectUnauthorized:false},r=>{let b='';r.on('data',d=>b+=d);r.on('end',()=>console.log(r.statusCode,b.trim()))})"
 ```
-
-For the page, drive real Chrome over the DevTools Protocol with `--headless=new
---ignore-certificate-errors --remote-debugging-port=9333`, and stub
-`window.SpeechRecognition` before the page script runs. That is the only way to exercise
-language fallback and the idle-then-speak path. Use a real client, not a hand-rolled
-WebSocket, or you will not catch browser-specific rules.
 
 `--ignore-certificate-errors` is required because the certificate is self-signed.
 
