@@ -19,6 +19,9 @@ using System.Web.Script.Serialization;
 
 namespace DictationBridge
 {
+    // QRCoder, vendored under vendor\QRCoder. MIT, (c) 2013-2018 Raffael
+    // Herrmann; see vendor\QRCoder\LICENSE.txt. Only the encoder is used.
+    using QRCoder;
     internal static class Native
     {
         public const uint INPUT_KEYBOARD = 1;
@@ -1340,6 +1343,90 @@ namespace DictationBridge
         }
     }
 
+    // Paints the QR code for the panel's own page address.
+    //
+    // The encoding is QRCoder's, vendored under vendor\QRCoder and compiled in
+    // by build.ps1. Do not hand-write an encoder here: a QR code has enough
+    // interacting rules (masking, penalty scoring, placement order, Galois
+    // field arithmetic) that a plausible-looking matrix is very often not a
+    // scannable one. The first attempt at this was written by hand and rendered
+    // a clean-looking code that no scanner could read. QRCoder is 46 KB of
+    // compiled-in MIT source, which is cheaper than being wrong.
+    internal sealed class QrView : Control
+    {
+        private bool[,] _modules;
+
+        public QrView()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                | ControlStyles.OptimizedDoubleBuffer, true);
+            BackColor = Color.White;
+        }
+
+        // Encodes the address and repaints. Errors are swallowed deliberately:
+        // an address that cannot be encoded must not stop the panel from
+        // appearing, and the address is always shown in text right beside this.
+        public void SetAddress(string address)
+        {
+            try
+            {
+                using (QRCodeData data = QRCodeGenerator.GenerateQrCode(
+                    address, QRCodeGenerator.ECCLevel.M))
+                {
+                    // The matrix already carries the four-module quiet zone that
+                    // AddQuietZone pads around it, so n counts the quiet zone as
+                    // well as the code. Adding another one here would waste a
+                    // third of the available pixels and halve the module size.
+                    int n = data.ModuleMatrix.Count;
+                    bool[,] matrix = new bool[n, n];
+                    for (int y = 0; y < n; y++)
+                        for (int x = 0; x < n; x++)
+                            matrix[y, x] = data.ModuleMatrix[y][x];
+                    _modules = matrix;
+                }
+            }
+            catch (Exception)
+            {
+                _modules = null;
+            }
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(Color.White);
+            if (_modules == null) return;
+
+            int n = _modules.GetLength(0);
+
+            // Whole pixels per module, no antialiasing. A half-pixel module
+            // produces blurred edges that a phone camera can fail to resolve.
+            int cell = Math.Max(1, Math.Min(Width, Height) / n);
+            int drawn = cell * n;
+            int offsetX = (Width - drawn) / 2;
+            int offsetY = (Height - drawn) / 2;
+
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+
+            using (SolidBrush dark = new SolidBrush(Skin.Ink))
+            {
+                for (int y = 0; y < n; y++)
+                {
+                    for (int x = 0; x < n; x++)
+                    {
+                        if (!_modules[y, x]) continue;
+                        g.FillRectangle(dark,
+                            offsetX + x * cell,
+                            offsetY + y * cell,
+                            cell, cell);
+                    }
+                }
+            }
+        }
+    }
+
     // A small always-on-top panel, in the shape of the floating helpers people
     // already keep beside their work: a status strip you can hit to arm, with the
     // details a click away. Borderless and draggable so it never gets in the way.
@@ -1625,10 +1712,11 @@ namespace DictationBridge
         private PaintCard _lastCard;
         private Label _listHeader;
         private Label _emptyNote;
+        private QrView _qr;
 
         // One place that owns the sizes, so expand and collapse cannot disagree.
         private static readonly Size CollapsedSize = new Size(320, 56);
-        private static readonly Size ExpandedSize = new Size(320, 356);
+        private static readonly Size ExpandedSize = new Size(320, 446);
         private const string PositionFile = "dictation-bridge-position.txt";
 
         public MainForm(Bridge bridge, string url, HotkeyWindow hotkeys)
@@ -1830,10 +1918,14 @@ private void BuildUi(Control host)
             };
 
             // Address, on a soft card so it reads as a field rather than a link.
+            // The QR code sits on the left of it: scanning beats typing a URL
+            // into a phone keyboard, and the address changes every time the
+            // machine lands on a new network, so it has to be shown not written
+            // down.
             var urlCard = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 42,
+                Height = 132,
                 BackColor = Skin.Surface
             };
             var urlBg = new PaintCard
@@ -1841,6 +1933,23 @@ private void BuildUi(Control host)
                 Dock = DockStyle.Fill,
                 Fill = Skin.Field,
                 Corner = 8
+            };
+
+            _qr = new QrView
+            {
+                Location = new Point(8, 8),
+                // The encoder emits a 29-module symbol for a typical address
+                // (21 + quiet zone). At 4px per module that is 116px, which
+                // leaves a module wide enough for a phone camera to resolve.
+                Size = new Size(116, 116)
+            };
+            _qr.SetAddress(_url);
+
+            var urlRight = new Panel
+            {
+                Location = new Point(130, 0),
+                Size = new Size(urlCard.Width - 130, urlCard.Height),
+                BackColor = Skin.Field
             };
             _urlLink = new LinkLabel
             {
@@ -1854,7 +1963,18 @@ private void BuildUi(Control host)
             };
             _urlLink.Text = _url;
             _urlLink.LinkClicked += (s, e) => Copy(_url);
-            urlCard.Controls.Add(_urlLink);
+            urlRight.Controls.Add(_urlLink);
+            urlCard.Resize += (s, e) =>
+            {
+                // Absolute coordinates inside a docked panel do not shrink that
+                // panel's minimum size, so the right-hand box is kept in step
+                // with the card here rather than relying on Dock.
+                urlRight.Width = urlCard.ClientSize.Width - 130;
+                urlRight.Height = urlCard.ClientSize.Height;
+            };
+
+            urlCard.Controls.Add(urlRight);
+            urlCard.Controls.Add(_qr);
             urlCard.Controls.Add(urlBg);
             urlBg.SendToBack();
 

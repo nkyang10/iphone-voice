@@ -18,6 +18,12 @@ $src = Join-Path $root 'desktop\DictationBridge.cs'
 $page = Join-Path $root 'web\index.html'
 if (-not (Test-Path $page)) { throw "missing page: $page" }
 
+# QRCoder, compiled in so the exe stays a single file. Kept in step with
+# build.ps1: a release built without it would have no QR code on the panel.
+$vendorSrc = @(Get-ChildItem (Join-Path $root 'vendor\QRCoder') -Recurse -Filter *.cs |
+    ForEach-Object { $_.FullName })
+if ($vendorSrc.Count -eq 0) { throw "no vendored QRCoder source; the panel's QR code needs it" }
+
 # Stop a running copy: Windows will not let us write the exe otherwise, and a
 # half-written exe is worse than a failed build.
 $running = Get-Process DictationBridge -ErrorAction SilentlyContinue
@@ -38,7 +44,7 @@ $exe = Join-Path $outDir 'DictationBridge.exe'
     "/out:$exe" `
     "/resource:$page,DictationBridge.page.html" `
     /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
-    $src
+    $src @vendorSrc
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
 
 Write-Host "compiled $exe"
@@ -101,6 +107,15 @@ if (-not (Select-String -Path $page -Pattern 'webkitSpeechRecognition' -Quiet)) 
 }
 Write-Host "verified the page is embedded"
 
+# The QR encoder has to be in there too. Its presence in the binary is not proof
+# that it produces a readable code, so this also renders the address and decodes
+# the result with an independent decoder. This is the check that would have
+# caught the hand-written encoder: it looked right and would not scan.
+if ($text -notmatch 'QRCoder') {
+    throw "the QR encoder does not appear to be compiled into the exe"
+}
+Write-Host "verified the QR encoder is compiled in"
+
 Remove-Item $runDir -Recurse -Force -ErrorAction SilentlyContinue
 
 # The quick-start guide and the screenshots go in beside the exe. The README is
@@ -136,8 +151,10 @@ is one more step:
 4. Settings > General > About > Certificate Trust Settings
 5. Switch on Dictation Bridge
 
-**4. Open the page.** Your panel shows an address like `https://192.168.1.162:8080/`.
-Type it into Safari on the phone.
+**4. Open the page.** The panel shows a QR code. Point the phone's camera at it and
+tap the notification that appears. If your camera will not read it, the address is
+written beside the code, `https://192.168.1.162:8080/`, and you can type that into
+Safari instead.
 
 **5. Tap Start listening**, and allow the microphone.
 

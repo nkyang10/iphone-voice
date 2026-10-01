@@ -13,6 +13,11 @@ That compiles with the `csc.exe` in `Microsoft.NET\Framework64\v4.0.30319` and e
 `web/index.html` into the exe as a resource. No SDK to install and no network access
 needed.
 
+It also compiles in the vendored QRCoder encoder under `vendor/QRCoder/`, which supplies
+the QR code on the panel. That is the only third-party code in the project, it is MIT,
+and it is compiled rather than loaded, so the exe is still a single file. See `AGENTS.md`
+for why it is vendored instead of written by hand.
+
 Edit `web/index.html`, rebuild, and copy the exe to wherever you are testing. The build
 stops a running copy of the app first, because Windows will not let you overwrite a file
 that is executing.
@@ -50,6 +55,24 @@ hand. Always use a real browser rather than a hand-rolled client: browsers take 
 values verbatim and trim them, so a lenient client will pass where Safari fails.
 
 `--ignore-certificate-errors` is required, because the certificate is self-signed.
+
+### The QR code
+
+The panel's QR code is the one thing that has to be verified with an **independent**
+decoder, because a QR code that renders convincingly can still be unreadable. The first
+version here was a hand-written encoder and no scanner could read it.
+
+Screenshot the panel and feed the crop through OpenCV:
+
+```python
+import cv2
+img = cv2.imread(r"docs/panel-expanded.png")
+print(cv2.QRCodeDetector().detectAndDecode(img)[0])
+```
+
+The crop must match `https://<ip>:<port>/` as printed on startup. If OpenCV cannot read
+it, the phone will not either. `make-release.ps1` at least checks the encoder is present
+in the binary, which catches a release built without the vendored source.
 
 ## Release
 

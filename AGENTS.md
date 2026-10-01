@@ -51,10 +51,17 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
 
 ## Layout rules
 
-- One `.cs` file. It is a single-file app by design; splitting it up buys nothing at
-  this size and complicates the build.
-- No NuGet, no npm, no third-party anything. The exe's only references are `mscorlib`,
+- One `.cs` file of our own, in `desktop/`. It is a single-file app by design; splitting
+  it up buys nothing at this size and complicates the build.
+- No NuGet, no npm, no package manager. The exe's only references are `mscorlib`,
   `System`, `System.Core`, `System.Drawing`, `System.Windows.Forms`.
+- **One vendored library is allowed: QRCoder, under `vendor/QRCoder`.** It supplies the
+  QR encoder and is compiled in by `build.ps1`, so nothing is loaded at runtime and the
+  exe is still a single file. This is an exception to the no-third-party rule, and the
+  reason is in "Things that will bite you" below: the QR code has to be scannable, and a
+  hand-written encoder is not a substitute for one that is known to work. Do not add a
+  second vendored library without the same argument, and prefer `vendor/` over a
+  package reference so the build keeps working offline with the shipped `csc.exe`.
 - The desktop UI is a borderless `TopMost` form, not a normal window:
   `FormBorderStyle.None` and `ShowInTaskbar = false`, with a one-pixel transparent
   shadow panel so the edge is not invisible. Keep it that way; a caption or a
@@ -98,6 +105,16 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
 - The page must stay dependency-free. It is served to a phone over a LAN.
 
 ## Things that will bite you
+
+**Never hand-write a QR encoder.** The first version of `QrView` included an
+encoder written by hand: Reed-Solomon division, mask selection, the eight
+version tables, the placement zig-zag. It produced a clean, symmetric, entirely
+plausible-looking 29x29 matrix that no scanner could read, and it was roughly 450
+lines. The Reed-Solomon output eventually matched the published test vectors and
+the code *still* would not decode, because the bug had moved into a placement or
+masking rule. This is why `QrView` now calls the vendored QRCoder and nothing
+else. If you ever need to touch the code, verify it round-trips through an
+independent decoder rather than by eye.
 
 **The recognizer must be retired before it is aborted.** `abort()` fires that
 instance's `onend`, and `onend` schedules another restart. Skip the retire step and each

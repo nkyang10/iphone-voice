@@ -28,7 +28,11 @@ no runtime, no setup. A small panel appears near the middle of your screen.
 
 **2. On the phone**
 
-Open the address the panel shows you. It looks like `https://192.168.1.162:8080/`.
+Point the phone's camera at the QR code on the panel and tap the link that appears.
+That opens the address, which looks like `https://192.168.1.162:8080/`.
+
+If your camera won't read the code, the same address is written beside it — type it
+into Safari instead.
 
 The phone will ask you to install a certificate. Tap through it, then come back. This
 happens **once**, and the detailed steps are in
@@ -59,6 +63,7 @@ nothing is ever lost.
 | | |
 | --- | --- |
 | Start / stop typing | **Ctrl+Alt+D**, or click the panel button |
+| Open the page on the phone | Scan the QR code in the panel |
 | See the panel again | Click the tray icon |
 | Move the panel | Drag it. It remembers where you left it |
 | Change the shortcut | Expand the panel, press **Change hotkey**, press a new combination |
@@ -144,7 +149,8 @@ appear broken without it:
 4. **Settings > General > About > Certificate Trust Settings**
 5. Switch on **Dictation Bridge**
 
-**Open the page** at the address the panel shows.
+**Open the page.** Scan the QR code on the panel, or type in the address written beside
+it.
 
 ### It keeps working
 

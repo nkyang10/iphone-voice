@@ -37,6 +37,12 @@ foreach ($f in @($src, $page)) {
     if (-not (Test-Path $f)) { throw "missing input: $f" }
 }
 
+# QRCoder, vendored source. Compiled into the exe so the app still ships as one
+# file; nothing here is loaded at runtime. See vendor\QRCoder\LICENSE.txt.
+$vendor = Join-Path $root 'vendor\QRCoder'
+$vendorSrc = @(Get-ChildItem $vendor -Recurse -Filter *.cs | ForEach-Object { $_.FullName })
+if ($vendorSrc.Count -eq 0) { throw "no vendored QRCoder source under $vendor" }
+
 # Keep the served copy in step with the source of truth.
 Copy-Item $page $stage -Force
 
@@ -45,10 +51,11 @@ Copy-Item $page $stage -Force
     "/out:$exe" `
     "/resource:$page,DictationBridge.page.html" `
     /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
-    $src
+    $src @vendorSrc
 
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
 
 $size = [math]::Round((Get-Item $exe).Length / 1KB, 1)
 Write-Host "built $exe  ($size KB)"
 Write-Host "embedded: DictationBridge.page.html  ($([math]::Round((Get-Item $page).Length / 1KB, 1)) KB)"
+Write-Host "vendored: QRCoder encoder  ($($vendorSrc.Count) files, compiled in)"
