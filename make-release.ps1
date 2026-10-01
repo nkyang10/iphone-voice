@@ -278,6 +278,7 @@ exe.
 Reproduced verbatim from vendor\QRCoder\LICENSE.txt:
 
 ------------------------------------------------------------------------------
+
 "@
 
 $noticeBody = Get-Content $vendorLicence -Raw
