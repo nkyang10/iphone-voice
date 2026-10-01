@@ -7,6 +7,9 @@
 diagnostics.log*
 dictation-bridge.log
 
+# Local preference: which hotkey the user chose.
+dictation-bridge-hotkey.txt
+
 # Compiled binary. The source is the artifact; build with build.ps1.
 *.exe
 

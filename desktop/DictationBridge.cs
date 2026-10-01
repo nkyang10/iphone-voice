@@ -26,6 +26,8 @@ namespace DictationBridge
         public const int WM_HOTKEY = 0x0312;
         public const uint MOD_CONTROL = 0x0002;
         public const uint MOD_ALT = 0x0001;
+        public const uint MOD_SHIFT = 0x0004;
+        public const uint MOD_WIN = 0x0008;
         public const uint MOD_NOREPEAT = 0x4000;
         public static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
 
@@ -971,11 +973,65 @@ namespace DictationBridge
     internal sealed class HotkeyWindow : NativeWindow
     {
         public event Action Pressed;
+
+        // Ctrl+Alt+D by default, but the user can rebind it. The choice is
+        // remembered so it survives a restart.
         private const int HotkeyId = 0x0BD1;
+        private const string PrefFile = "dictation-bridge-hotkey.txt";
+
+        private uint _mods = Native.MOD_CONTROL | Native.MOD_ALT;
+        private uint _key = (uint)Keys.D;
+        private bool _registered;
 
         public HotkeyWindow()
         {
             CreateHandle(new CreateParams { Parent = Native.HWND_MESSAGE });
+            Load();
+        }
+
+        public string Combination
+        {
+            get
+            {
+                string s = "";
+                if ((_mods & Native.MOD_CONTROL) != 0) s += "Ctrl+";
+                if ((_mods & Native.MOD_ALT) != 0) s += "Alt+";
+                if ((_mods & Native.MOD_SHIFT) != 0) s += "Shift+";
+                if ((_mods & Native.MOD_WIN) != 0) s += "Win+";
+                return s + KeyName(_key);
+            }
+        }
+
+        // Keys.ToString() turns non-printable keys into names like "Oem7" or
+        // "D1", which is useless in a shortcut label.
+        public static string KeyName(uint key)
+        {
+            switch (key)
+            {
+                case (uint)Keys.Space: return "Space";
+                case (uint)Keys.Escape: return "Esc";
+                case (uint)Keys.Enter: return "Enter";
+                case (uint)Keys.Tab: return "Tab";
+                case (uint)Keys.Back: return "Backspace";
+                case (uint)Keys.Delete: return "Del";
+                case (uint)Keys.Insert: return "Ins";
+                case (uint)Keys.Home: return "Home";
+                case (uint)Keys.End: return "End";
+                case (uint)Keys.PageUp: return "PgUp";
+                case (uint)Keys.PageDown: return "PgDn";
+                case (uint)Keys.Left: return "Left";
+                case (uint)Keys.Right: return "Right";
+                case (uint)Keys.Up: return "Up";
+                case (uint)Keys.Down: return "Down";
+            }
+            if (key >= (uint)Keys.F1 && key <= (uint)Keys.F24)
+            {
+                return "F" + (key - (uint)Keys.F1 + 1).ToString();
+            }
+            if (key >= 0x30 && key <= 0x39) return ((char)key).ToString();
+            if (key >= 0x41 && key <= 0x5A) return ((char)key).ToString();
+            if (key >= 0x60 && key <= 0x69) return "Num" + (char)key;
+            return "key" + key.ToString("X2");
         }
 
         protected override void WndProc(ref Message m)
@@ -987,212 +1043,538 @@ namespace DictationBridge
             base.WndProc(ref m);
         }
 
+        private void Load()
+        {
+            try
+            {
+                string path = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, PrefFile);
+                if (!System.IO.File.Exists(path)) return;
+                string[] parts = System.IO.File.ReadAllText(path).Split('+');
+                uint k = 0;
+                if (parts.Length < 2) return;
+                Keys key = (Keys)Enum.Parse(typeof(Keys), parts[parts.Length - 1], true);
+                k = (uint)key;
+                _key = k;
+                _mods = 0;
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    string m = parts[i].Trim().ToLowerInvariant();
+                    if (m == "ctrl") _mods |= Native.MOD_CONTROL;
+                    else if (m == "alt") _mods |= Native.MOD_ALT;
+                    else if (m == "shift") _mods |= Native.MOD_SHIFT;
+                    else if (m == "win") _mods |= Native.MOD_WIN;
+                }
+                Log.Write("restored hotkey: " + Combination);
+            }
+            catch (Exception e)
+            {
+                Log.Write("could not read saved hotkey: " + e.Message);
+            }
+        }
+
+        private void Save()
+        {
+            try
+            {
+                string path = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, PrefFile);
+                string s = "";
+                if ((_mods & Native.MOD_CONTROL) != 0) s += "Ctrl+";
+                if ((_mods & Native.MOD_ALT) != 0) s += "Alt+";
+                if ((_mods & Native.MOD_SHIFT) != 0) s += "Shift+";
+                if ((_mods & Native.MOD_WIN) != 0) s += "Win+";
+                s += KeyName(_key);
+                System.IO.File.WriteAllText(path, s);
+            }
+            catch (Exception) { }
+        }
+
+        // Rebinds to whatever the user pressed. A modifier on its own is not a
+        // hotkey, so keep waiting rather than registering something useless.
+        public bool TryBind(uint mods, uint key)
+        {
+            if (mods == 0) return false;
+
+            Unregister();
+            if (!Native.RegisterHotKey(Handle, HotkeyId,
+                    mods | Native.MOD_NOREPEAT, key))
+            {
+                Log.Write("WARN: " + Describe(mods, key) + " is already taken by another app.");
+                // Put the previous binding back so the app stays usable.
+                Native.RegisterHotKey(Handle, HotkeyId, _mods | Native.MOD_NOREPEAT, _key);
+                _registered = true;
+                return false;
+            }
+
+            _mods = mods;
+            _key = key;
+            _registered = true;
+            Save();
+            Log.Write("hotkey registered: " + Combination);
+            return true;
+        }
+
+        private static string Describe(uint mods, uint key)
+        {
+            string s = "";
+            if ((mods & Native.MOD_CONTROL) != 0) s += "Ctrl+";
+            if ((mods & Native.MOD_ALT) != 0) s += "Alt+";
+            if ((mods & Native.MOD_SHIFT) != 0) s += "Shift+";
+            if ((mods & Native.MOD_WIN) != 0) s += "Win+";
+            return s + KeyName(key);
+        }
+
+        public void Unregister()
+        {
+            if (!_registered) return;
+            Native.UnregisterHotKey(Handle, HotkeyId);
+            _registered = false;
+        }
+
         public void Register()
         {
-            if (!Native.RegisterHotKey(Handle, HotkeyId,
-                    Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT, (uint)Keys.D))
+            if (Native.RegisterHotKey(Handle, HotkeyId,
+                    _mods | Native.MOD_NOREPEAT, _key))
             {
-                Log.Write("WARN: Ctrl+Alt+D is already taken by another app. Use the tray menu instead.");
+                _registered = true;
+                Log.Write("hotkey registered: " + Combination);
             }
             else
             {
-                Log.Write("hotkey registered: Ctrl+Alt+D");
+                Log.Write("WARN: " + Combination +
+                          " is already taken. Rebind it in the panel.");
             }
         }
     }
 
+    // Captures the next key combination the user presses, then rebinds.
+    internal sealed class HotkeyCaptureForm : Form
+    {
+        private readonly HotkeyWindow _hotkeys;
+        public bool Bound { get; private set; }
+
+        public HotkeyCaptureForm(HotkeyWindow hotkeys)
+        {
+            _hotkeys = hotkeys;
+            Text = "Set hotkey";
+            ClientSize = new Size(340, 150);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            BackColor = Color.FromArgb(24, 26, 30);
+            ForeColor = Color.FromArgb(232, 234, 237);
+            Font = new Font("Segoe UI", 9F);
+            TopMost = true;
+            KeyPreview = true;
+
+            var hint = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 40,
+                Text = "Press the combination you want to use.",
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            var status = new Label
+            {
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 12F, FontStyle.Bold)
+            };
+            status.Text = "waiting...";
+
+            var cancel = new Button
+            {
+                Dock = DockStyle.Bottom,
+                Height = 32,
+                Text = "Cancel",
+                FlatStyle = FlatStyle.Flat,
+                UseVisualStyleBackColor = false
+            };
+            cancel.Click += (s, e) => { Bound = false; Close(); };
+
+            Controls.Add(status);
+            Controls.Add(hint);
+            Controls.Add(cancel);
+            _status = status;
+        }
+
+        private readonly Label _status;
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            Keys mods = keyData & Keys.Modifiers;
+
+            if (key == Keys.Escape)
+            {
+                Bound = false;
+                Close();
+                return true;
+            }
+
+            // F12 is reserved by the debugger, per RegisterHotKey docs.
+            if (key == Keys.F12) return true;
+
+            uint modBits = 0;
+            if ((mods & Keys.Control) != 0) modBits |= Native.MOD_CONTROL;
+            if ((mods & Keys.Alt) != 0) modBits |= Native.MOD_ALT;
+            if ((mods & Keys.Shift) != 0) modBits |= Native.MOD_SHIFT;
+            if ((mods & Keys.LWin) != 0 || (mods & Keys.RWin) != 0) modBits |= Native.MOD_WIN;
+
+            // A bare modifier is not bindable; wait for a real key.
+            if (modBits == 0) return true;
+
+            _status.Text = key == Keys.D ? "D" : key.ToString();
+            if (_hotkeys.TryBind(modBits, (uint)key))
+            {
+                Bound = true;
+                Close();
+            }
+            else
+            {
+                _status.Text = "taken - try another";
+            }
+            return true;
+        }
+    }
+
+    // A small always-on-top panel, in the shape of the floating helpers people
+    // already keep beside their work: a status strip you can hit to arm, with the
+    // details a click away. Borderless and draggable so it never gets in the way.
     internal sealed class MainForm : Form
     {
         private readonly Bridge _bridge;
         private readonly string _url;
+        private readonly HotkeyWindow _hotkeys;
         private readonly System.Windows.Forms.Timer _timer;
 
-        private readonly Label _armBanner;
-        private readonly Button _armButton;
-        private readonly Label _connState;
-        private readonly Label _counts;
-        private readonly TextBox _lastText;
-        private readonly ListBox _bufferList;
-        private readonly CheckBox _flushBox;
-        private readonly LinkLabel _urlLink;
+        // Not readonly: these are built by BuildUi, which is called from the
+        // constructor but is not itself one.
+        private Panel _strip;
+        private Label _status;
+        private Panel _detail;
+        private Panel _body;
+        private Button _toggle;
+        private Button _collapse;
+        private Button _setHotkey;
+        private CheckBox _flushBox;
+        private TextBox _lastText;
+        private ListBox _bufferList;
+        private LinkLabel _urlLink;
 
-        public MainForm(Bridge bridge, string url)
+        private Point _dragOrigin;
+        private bool _dragging;
+        private bool _expanded;
+        private bool _suppressFlushEvent;
+
+        public MainForm(Bridge bridge, string url, HotkeyWindow hotkeys)
         {
             _bridge = bridge;
             _url = url;
+            _hotkeys = hotkeys;
 
             Text = "Dictation Bridge";
-            ClientSize = new Size(430, 520);
-            MinimumSize = new Size(400, 480);
-            StartPosition = FormStartPosition.CenterScreen;
-            BackColor = Color.FromArgb(24, 26, 30);
+            FormBorderStyle = FormBorderStyle.None;
+            ClientSize = new Size(268, 44);
+            Size = new Size(268, 44);
+            StartPosition = FormStartPosition.Manual;
+            BackColor = Color.FromArgb(22, 24, 28);
             ForeColor = Color.FromArgb(232, 234, 237);
             Font = new Font("Segoe UI", 9F);
+            TopMost = true;
+            ShowInTaskbar = false;
+            MinimizeBox = false;
+            MaximizeBox = false;
+            Padding = new Padding(1);
+            try { DoubleBuffered = true; } catch (Exception) { }
 
-            _armBanner = new Label
+            // Soft shadow, the detail that makes a floating panel look deliberate.
+            try
             {
-                Dock = DockStyle.Top,
-                Height = 64,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font("Segoe UI", 20F, FontStyle.Bold)
+                BackColor = Color.FromArgb(0, 0, 0);
+                TransparencyKey = Color.FromArgb(0, 0, 0);
+                var shadow = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.FromArgb(0, 0, 0),
+                    Padding = new Padding(1, 1, 2, 2)
+                };
+                Controls.Add(shadow);
+                var surface = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.FromArgb(22, 24, 28),
+                    Padding = new Padding(0, 0, 1, 1)
+                };
+                shadow.Controls.Add(surface);
+                BuildUi(surface);
+            }
+            catch (Exception)
+            {
+                // Transparency unsupported: fall back to a plain panel.
+                Controls.Clear();
+                BuildUi(this);
+            }
+
+            _bridge.Changed += Refresh2;
+            _timer = new System.Windows.Forms.Timer { Interval = 700 };
+            _timer.Tick += (s, e) => Refresh2();
+            _timer.Start();
+            FormClosed += (s, e) => _timer.Stop();
+            Refresh2();
+        }
+
+        private void BuildUi(Control host)
+        {
+            _body = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(22, 24, 28),
+                Padding = new Padding(10, 8, 10, 10)
             };
 
-            _armButton = new Button
+            _strip = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 42,
-                Text = "Toggle typing  (Ctrl+Alt+D)",
+                Height = 28,
+                BackColor = Color.FromArgb(22, 24, 28)
+            };
+
+            _toggle = new Button
+            {
+                Dock = DockStyle.Left,
+                Width = 104,
+                Height = 26,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10F),
-                UseVisualStyleBackColor = false
+                UseVisualStyleBackColor = false,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Text = "DISARMED"
             };
-            _armButton.FlatAppearance.BorderSize = 0;
-            _armButton.Click += (s, e) => _bridge.SetArmed(!_bridge.Armed);
+            _toggle.FlatAppearance.BorderSize = 0;
+            _toggle.FlatAppearance.MouseOverBackColor = Color.FromArgb(60, 64, 67);
+            _toggle.Click += (s, e) => _bridge.SetArmed(!_bridge.Armed);
 
-            var urlPanel = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = Color.FromArgb(30, 33, 38) };
+            _status = new Label
+            {
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 8F)
+            };
+
+            _collapse = new Button
+            {
+                Dock = DockStyle.Right,
+                Width = 24,
+                Height = 26,
+                FlatStyle = FlatStyle.Flat,
+                UseVisualStyleBackColor = false,
+                Text = "_",
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(154, 160, 166)
+            };
+            _collapse.FlatAppearance.BorderSize = 0;
+            _collapse.Click += (s, e) => SetExpanded(false);
+
+            _strip.Controls.Add(_status);
+            _strip.Controls.Add(_toggle);
+            _strip.Controls.Add(_collapse);
+
+            _detail = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(22, 24, 28)
+            };
+
+            var phoneRow = new Panel { Dock = DockStyle.Top, Height = 18 };
             _urlLink = new LinkLabel
             {
                 Dock = DockStyle.Fill,
-                Text = "Open on phone: " + url,
                 TextAlign = ContentAlignment.MiddleCenter,
                 AutoSize = false,
+                Font = new Font("Segoe UI", 8F),
                 LinkColor = Color.FromArgb(138, 180, 248),
                 ActiveLinkColor = Color.FromArgb(138, 180, 248)
             };
-            _urlLink.LinkClicked += (s, e) => Copy(url);
-            urlPanel.Controls.Add(_urlLink);
+            _urlLink.Text = _url;
+            _urlLink.LinkClicked += (s, e) => Copy(_url);
+            phoneRow.Controls.Add(_urlLink);
 
-            _connState = new Label
-            {
-                Dock = DockStyle.Top,
-                Height = 26,
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-
-            _counts = new Label
-            {
-                Dock = DockStyle.Top,
-                Height = 24,
-                TextAlign = ContentAlignment.MiddleCenter,
-                ForeColor = Color.FromArgb(154, 160, 166)
-            };
-
+            var lastRow = new Panel { Dock = DockStyle.Top, Height = 34, Padding = new Padding(0, 2, 0, 2) };
             _lastText = new TextBox
             {
-                Dock = DockStyle.Top,
-                Height = 62,
+                Dock = DockStyle.Fill,
                 Multiline = true,
                 ReadOnly = true,
-                ScrollBars = ScrollBars.Vertical,
+                ScrollBars = ScrollBars.None,
+                BorderStyle = BorderStyle.None,
                 BackColor = Color.FromArgb(30, 33, 38),
                 ForeColor = Color.FromArgb(138, 180, 248),
-                BorderStyle = BorderStyle.None,
-                Font = new Font("Segoe UI", 11F)
+                Font = new Font("Segoe UI", 9F),
+                TextAlign = HorizontalAlignment.Center
             };
-
-            var listHeader = MakeLabel("BUFFERED - types when you arm", DockStyle.Top, 24,
-                Color.FromArgb(128, 134, 139), 9F, FontStyle.Bold);
+            lastRow.Controls.Add(_lastText);
 
             _bufferList = new ListBox
             {
                 Dock = DockStyle.Fill,
+                BorderStyle = BorderStyle.None,
                 BackColor = Color.FromArgb(30, 33, 38),
                 ForeColor = Color.FromArgb(232, 234, 237),
-                BorderStyle = BorderStyle.None,
-                IntegralHeight = false
+                IntegralHeight = false,
+                Font = new Font("Segoe UI", 8F)
             };
 
-            var bottom = new Panel { Dock = DockStyle.Bottom, Height = 76, BackColor = Color.FromArgb(30, 33, 38) };
+            var listWrap = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 2, 0, 2) };
+            listWrap.Controls.Add(_bufferList);
+
+            var listLabel = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 15,
+                Text = "BUFFERED - typed when you arm",
+                Font = new Font("Segoe UI", 7F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(128, 134, 139)
+            };
+
+            var bottom = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 46,
+                BackColor = Color.FromArgb(22, 24, 28),
+                Padding = new Padding(0, 4, 0, 0)
+            };
 
             _flushBox = new CheckBox
             {
-                Text = "Buffer while disarmed, then type on arm",
+                Text = "Buffer while disarmed",
                 Checked = true,
                 AutoSize = true,
-                Location = new Point(12, 10),
-                ForeColor = Color.FromArgb(232, 234, 237),
-                BackColor = Color.FromArgb(30, 33, 38)
+                Location = new Point(10, 6),
+                Font = new Font("Segoe UI", 8F),
+                FlatStyle = FlatStyle.Flat
             };
+            _flushBox.FlatAppearance.BorderSize = 0;
             _flushBox.CheckedChanged += (s, e) =>
             {
+                if (_suppressFlushEvent) return;
                 _bridge.SetFlushOnArm(_flushBox.Checked);
                 Log.Write(_flushBox.Checked
                     ? "mode: buffer and flush on arm"
                     : "mode: drop while disarmed");
             };
 
-            var clearButton = MakeButton("Clear", new Size(90, 28), new Point(12, 40));
-            clearButton.Click += (s, e) => _bridge.ClearBuffer();
-
-            var copyButton = MakeButton("Copy address", new Size(120, 28), new Point(110, 40));
-            copyButton.Click += (s, e) => Copy(_url);
-
-            var quitButton = MakeButton("Quit", new Size(70, 28), new Point(240, 40));
-            quitButton.Click += (s, e) => Close();
+            _setHotkey = SmallButton("Set hotkey", 80, new Point(10, 24), (s, e) => Rebind());
+            var clearButton = SmallButton("Clear", 56, new Point(94, 24), (s, e) => _bridge.ClearBuffer());
+            var copyButton = SmallButton("Copy URL", 66, new Point(154, 24), (s, e) => Copy(_url));
+            var quitButton = SmallButton("Quit", 48, new Point(224, 24), (s, e) => Close());
 
             bottom.Controls.Add(_flushBox);
+            bottom.Controls.Add(_setHotkey);
             bottom.Controls.Add(clearButton);
             bottom.Controls.Add(copyButton);
             bottom.Controls.Add(quitButton);
 
-            var listHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 0) };
-            listHost.Controls.Add(_bufferList);
+            _detail.Controls.Add(listWrap);
+            _detail.Controls.Add(listLabel);
+            _detail.Controls.Add(lastRow);
+            _detail.Controls.Add(phoneRow);
 
-            Controls.Add(listHost);
-            Controls.Add(bottom);
-            Controls.Add(listHeader);
-            Controls.Add(_lastText);
-            Controls.Add(_counts);
-            Controls.Add(_connState);
-            Controls.Add(urlPanel);
-            Controls.Add(_armButton);
-            Controls.Add(_armBanner);
+            _body.Controls.Add(_detail);
+            _body.Controls.Add(bottom);
+            _body.Controls.Add(_strip);
 
-            _bridge.Changed += Refresh2;
-            _timer = new System.Windows.Forms.Timer { Interval = 700 };
-            _timer.Tick += (s, e) => Refresh2();
-            _timer.Start();
+            host.Controls.Add(_body);
+            SetExpanded(false);
 
-            FormClosed += (s, e) => _timer.Stop();
-            Refresh2();
+            // Drag anywhere on the strip or the padding.
+            _strip.MouseDown += OnDragStart;
+            _body.MouseDown += OnDragStart;
+            _detail.MouseDown += OnDragStart;
+            _status.MouseDown += OnDragStart;
+            _status.MouseDoubleClick += (s, e) => SetExpanded(!_expanded);
+            _collapse.MouseDoubleClick += (s, e) => SetExpanded(true);
         }
 
-        private static Label MakeLabel(string text, DockStyle dock, int height, Color color, float size, FontStyle style)
-        {
-            return new Label
-            {
-                Text = text,
-                Dock = dock,
-                Height = height,
-                ForeColor = color,
-                Font = new Font("Segoe UI", size, style),
-                Padding = new Padding(12, 6, 0, 0)
-            };
-        }
-
-        private static Button MakeButton(string text, Size size, Point at)
+        private static Button SmallButton(string text, int width, Point at, EventHandler onClick)
         {
             var b = new Button
             {
                 Text = text,
-                Size = size,
+                Size = new Size(width, 20),
                 Location = at,
                 FlatStyle = FlatStyle.Flat,
+                UseVisualStyleBackColor = false,
+                Font = new Font("Segoe UI", 8F),
                 BackColor = Color.FromArgb(45, 49, 56),
-                ForeColor = Color.FromArgb(232, 234, 237),
-                UseVisualStyleBackColor = false
+                ForeColor = Color.FromArgb(232, 234, 237)
             };
             b.FlatAppearance.BorderSize = 0;
+            b.Click += onClick;
             return b;
+        }
+
+        private void Rebind()
+        {
+            using (var capture = new HotkeyCaptureForm(_hotkeys))
+            {
+                capture.ShowDialog(this);
+                if (capture.Bound)
+                {
+                    Log.Write("hotkey changed to " + _hotkeys.Combination);
+                }
+            }
+            Refresh2();
+        }
+
+        private void OnDragStart(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            _dragging = true;
+            _dragOrigin = e.Location;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!_dragging) return;
+            Location = new Point(Location.X + e.X - _dragOrigin.X,
+                                  Location.Y + e.Y - _dragOrigin.Y);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            _dragging = false;
+        }
+
+        private void SetExpanded(bool expanded)
+        {
+            _expanded = expanded;
+            if (expanded)
+            {
+                _detail.Visible = true;
+                ClientSize = new Size(268, 268);
+                Size = new Size(270, 290);
+                _collapse.Text = "_";
+            }
+            else
+            {
+                _detail.Visible = false;
+                ClientSize = new Size(268, 44);
+                Size = new Size(270, 46);
+                _collapse.Text = "+";
+            }
+            _toggle.Text = _bridge.Armed ? "ARMED" : "DISARMED";
+            _setHotkey.Text = "Hotkey";
+            ToolTip tip = new ToolTip();
+            tip.SetToolTip(_toggle, "Toggle typing. Shortcut: " + _hotkeys.Combination);
         }
 
         private void Copy(string text)
         {
-            try
-            {
-                Clipboard.SetText(text);
-                _urlLink.Text = "Copied: " + _url;
-            }
+            try { Clipboard.SetText(text); Log.Write("copied " + text); }
             catch (Exception) { }
         }
 
@@ -1203,21 +1585,20 @@ namespace DictationBridge
             bool present = _bridge.PhonePresent;
             int buffered = _bridge.Buffered;
 
-            _armBanner.Text = armed ? "ARMED" : "DISARMED";
-            _armBanner.BackColor = armed
+            _toggle.Text = armed ? "ARMED" : "DISARMED";
+            _toggle.BackColor = armed
                 ? Color.FromArgb(26, 115, 232)
-                : Color.FromArgb(60, 64, 67);
+                : Color.FromArgb(52, 56, 62);
+            _toggle.ForeColor = armed ? Color.White : Color.FromArgb(154, 160, 166);
 
-            _connState.Text = present
-                ? "phone connected"
-                : "waiting for phone - no connection";
-            _connState.ForeColor = present
+            if (present) _status.Text = "phone ok";
+            else _status.Text = "no phone";
+            _status.ForeColor = present
                 ? Color.FromArgb(52, 168, 83)
                 : Color.FromArgb(249, 171, 0);
 
-            _counts.Text = "typed " + _bridge.Typed +
-                           "   buffered " + buffered +
-                           "   words " + _bridge.WordCount;
+            _setHotkey.Text = _hotkeys.Combination;
+            _setHotkey.Width = Math.Max(80, _setHotkey.Text.Length * 7 + 14);
 
             _lastText.Text = _bridge.LastText;
 
@@ -1302,7 +1683,11 @@ namespace DictationBridge
             };
             _tray.DoubleClick += (s, e) => ShowWindow();
 
-            _form = new MainForm(_bridge, url);
+            _hotkeys = new HotkeyWindow();
+            _hotkeys.Pressed += () => _bridge.SetArmed(!_bridge.Armed);
+            _hotkeys.Register();
+
+            _form = new MainForm(_bridge, url, _hotkeys);
             _form.Show();
             _form.FormClosing += (s, e) =>
             {
@@ -1312,10 +1697,6 @@ namespace DictationBridge
                     _form.Hide();
                 }
             };
-
-            _hotkeys = new HotkeyWindow();
-            _hotkeys.Pressed += () => _bridge.SetArmed(!_bridge.Armed);
-            _hotkeys.Register();
 
             Update();
             System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 1000 };

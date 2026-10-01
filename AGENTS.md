@@ -41,6 +41,19 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   this size and complicates the build.
 - No NuGet, no npm, no third-party anything. The exe's only references are `mscorlib`,
   `System`, `System.Core`, `System.Drawing`, `System.Windows.Forms`.
+- The desktop UI is a borderless `TopMost` form, not a normal window:
+  `FormBorderStyle.None` and `ShowInTaskbar = false`, with a one-pixel transparent
+  shadow panel so the edge is not invisible. Keep it that way; a caption or a
+  taskbar button defeats the point of a floating helper.
+- `MainForm`'s fields are deliberately **not** `readonly`: they are assigned in
+  `BuildUi`, which the constructor calls, but C# requires the assignment to be
+  inside a constructor body.
+- Rebinding the hotkey must unregister before registering. `RegisterHotKey` keeps
+  an existing registration alive if called twice with the same id, so
+  `HotkeyWindow.TryBind` unregisters first and restores the previous binding if the
+  new one is refused. F12 is refused; the debugger reserves it.
+- `Keys.ToString()` produces names like `Oem7` or `D1` that are meaningless in a
+  shortcut label. Use `HotkeyWindow.KeyName`.
 - The page must stay dependency-free. It is served to a phone over a LAN.
 
 ## Things that will bite you

@@ -57,16 +57,23 @@ Two further constraints shaped the design:
 
 ## The floating panel
 
-Always on top, draggable, and compact. It shows:
+A small always-on-top panel, shaped like the floating helpers people already keep beside
+their work. It has a one-line status strip and expands to show everything.
 
-- **Arm state** and the hotkey that changes it
-- **Phone status**: whether the phone is polling
-- **Counts**: how much has been typed, buffered, and typed on the desktop
-- **The last thing typed**
-- **Buffered utterances**, which you can clear
+Strip: an **ARMED / DISARMED** button you can click, whether the phone is connected, and
+a `+` / `-` to expand. Drag anywhere on it to move it. No taskbar button; close it to hide
+to the tray, where the same controls are mirrored.
 
-Close the panel to hide it to the tray; the tray icon brings it back and carries the
-same controls. Use **Quit** in the tray menu to exit.
+Expanded it adds the phone address, the last thing typed, the buffer list, and buttons to
+rebind the hotkey, clear the buffer, copy the address, and quit.
+
+### Changing the hotkey
+
+**Ctrl+Alt+D** by default. Click the hotkey button in the expanded panel, press the
+combination you want, and it takes effect immediately. The choice is saved in
+`dictation-bridge-hotkey.txt` next to the exe and restored on restart. F12 is refused
+because Windows reserves it for the debugger. If a combination is already claimed by
+another app the bind is rejected, the old one is restored, and the panel says so.
 
 Change the port with `DictationBridge.exe --port 8099` if something else already owns 8080.
 
