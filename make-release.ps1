@@ -264,6 +264,11 @@ foreach ($f in $licences) {
 # Build the third-party notice by copying QRCoder's own licence in verbatim
 # rather than retyping it. A hand-transcribed licence is not a licence, and the
 # transcription drifts the first time someone tidies the wording.
+#
+# The newline between the header and the notice is LF, not CRLF, because
+# vendor\QRCoder\LICENSE.txt uses LF and the file is meant to be that text
+# byte-for-byte. A here-string gives whatever the script's own endings are, so
+# the separator is written explicitly rather than assumed.
 $noticeHeader = @"
 Third-party notices
 ====================
@@ -278,21 +283,44 @@ exe.
 Reproduced verbatim from vendor\QRCoder\LICENSE.txt:
 
 ------------------------------------------------------------------------------
-
-"@
-
+"@ -replace "`r`n", "`n"
 $noticeBody = Get-Content $vendorLicence -Raw
-Set-Content -Path (Join-Path $outDir 'THIRD_PARTY_NOTICES.txt') `
-    -Value ($noticeHeader + "`r`n" + $noticeBody) -Encoding UTF8
+# Written as bytes, not Set-Content: that adds a CRLF and a UTF-8 BOM under
+# PowerShell 5.1, neither of which belongs in a file that reproduces upstream
+# text. The licence is the one file here where the bytes are the point.
+$noticeText = $noticeHeader + "`n" + $noticeBody
+[IO.File]::WriteAllText(
+    (Join-Path $outDir 'THIRD_PARTY_NOTICES.txt'),
+    $noticeText,
+    (New-Object Text.UTF8Encoding($false)))
 
 # Prove the notice is the upstream text, not a paraphrase of it. If this ever
 # fails, the notice was edited by hand somewhere and the release is not
 # redistributable.
-$shippedNotice = Get-Content (Join-Path $outDir 'THIRD_PARTY_NOTICES.txt') -Raw
+$shippedNotice = [IO.File]::ReadAllText((Join-Path $outDir 'THIRD_PARTY_NOTICES.txt'))
 if (-not $shippedNotice.Contains($noticeBody.Trim())) {
     throw "THIRD_PARTY_NOTICES.txt does not carry QRCoder's licence verbatim"
 }
-Write-Host "third-party notice carries QRCoder's licence verbatim"
+# Byte-for-byte, not just "contains the text". A stray CRLF or a BOM introduced
+# by Set-Content would otherwise pass the check above and still mean the shipped
+# notice is not the file upstream published. The notice ends with the upstream
+# bytes exactly, so compare that tail.
+$shippedBytes = [IO.File]::ReadAllBytes((Join-Path $outDir 'THIRD_PARTY_NOTICES.txt'))
+$bodyBytes = [IO.File]::ReadAllBytes($vendorLicence)
+$startAt = $shippedBytes.Length - $bodyBytes.Length
+if ($startAt -lt 0) { throw 'the shipped notice is shorter than the upstream licence' }
+$tail = $shippedBytes[$startAt..($shippedBytes.Length - 1)]
+$diff = 0
+for ($i = 0; $i -lt $bodyBytes.Length; $i++) {
+    if ($tail[$i] -ne $bodyBytes[$i]) { $diff++ }
+}
+if ($diff -ne 0) {
+    throw "THIRD_PARTY_NOTICES.txt is not byte-identical to the upstream licence ($diff bytes differ)"
+}
+if ($shippedBytes[0] -eq 0xEF -and $shippedBytes[1] -eq 0xBB -and $shippedBytes[2] -eq 0xBF) {
+    throw "THIRD_PARTY_NOTICES.txt has a UTF-8 BOM; the upstream text has none"
+}
+Write-Host "third-party notice carries QRCoder's licence verbatim, byte for byte"
 
 $size = [math]::Round((Get-Item $exe).Length / 1KB, 1)
 Write-Host ""
