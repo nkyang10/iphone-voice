@@ -1,0 +1,14 @@
+# Private key for the self-signed HTTPS certificate. Never commit this: anyone
+# with it can impersonate the desktop to a phone that trusts it.
+*.pfx
+
+# Local runtime output.
+*.log
+diagnostics.log*
+dictation-bridge.log
+
+# Compiled binary. The source is the artifact; build with build.ps1.
+*.exe
+
+# The served page is a copy of web/index.html. Committing both invites drift.
+desktop/index.html

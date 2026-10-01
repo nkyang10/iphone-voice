@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Dictation Bridge</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
+    font: 17px/1.45 -apple-system, system-ui, sans-serif;
+    background: #0d0f12; color: #e8eaed;
+    min-height: 100vh; display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #5f6368; flex: 0 0 auto; }
+  .dot.ok { background: #34a853; }
+  .dot.warn { background: #f9ab00; }
+  .dot.bad { background: #ea4335; }
+  .label { font-size: 14px; color: #9aa0a6; }
+  select {
+    font: inherit; font-size: 15px; padding: 10px 12px; border-radius: 10px;
+    background: #202124; color: #e8eaed; border: 1px solid #3c4043; flex: 1;
+  }
+  .val { font-size: 15px; font-variant-numeric: tabular-nums; color: #e8eaed; }
+  button {
+    font: inherit; padding: 15px; border-radius: 12px; border: 1px solid #3c4043;
+    background: #202124; color: #e8eaed; width: 100%;
+  }
+  button:disabled { opacity: .45; }
+  #start { background: #1a73e8; border-color: #1a73e8; font-weight: 600; }
+  #stop { background: #202124; }
+  .card {
+    background: #16181c; border: 1px solid #2a2d31; border-radius: 12px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
+    color: #80868b; margin: 0; font-weight: 600; }
+  #final {
+    font-size: 19px; min-height: 30px; word-break: break-word;
+    color: #8ab4f8; white-space: pre-wrap;
+  }
+  #interim { font-size: 15px; min-height: 22px; color: #9aa0a6; word-break: break-word; }
+  #stats { font-size: 13px; color: #80868b; line-height: 1.6; }
+  #stats b { color: #bdc1c6; font-weight: 500; }
+  .warnbox {
+    display: none; background: #3c2f12; border: 1px solid #7a5c17;
+    color: #fdd663; border-radius: 10px; padding: 11px 13px; font-size: 14px;
+  }
+  .warnbox.show { display: block; }
+  .pendingbox {
+    display: none; background: #17303f; border: 1px solid #1f5b7a;
+    color: #8ab4f8; border-radius: 10px; padding: 11px 13px; font-size: 14px;
+  }
+  #transcript {
+    max-height: 30vh; overflow-y: auto; font-size: 15px; line-height: 1.5;
+    -webkit-overflow-scrolling: touch;
+  }
+  .tline { padding: 3px 0; border-bottom: 1px solid #23262b; word-break: break-word; }
+  .tline:last-child { border-bottom: 0; }
+  .pending-line { color: #fdd663; }
+  input[type=checkbox] { width: 20px; height: 20px; }
+  button { margin-top: 2px; }
+  .diagout {
+    display: none; max-height: 34vh; overflow: auto; margin: 8px 0 0;
+    font: 11px/1.45 ui-monospace, Menlo, monospace; color: #9aa0a6;
+    white-space: pre-wrap; word-break: break-all; background: #12141700;
+  }
+  .diagout.show { display: block; }
+  .ttime { color: #80868b; font-size: 12px; font-variant-numeric: tabular-nums;
+    margin-right: 8px; }
+  hr { border: 0; border-top: 1px solid #2a2d31; margin: 0; }
+  a { color: #8ab4f8; }
+</style>
+</head>
+<body>
+
+<h1>Dictation Bridge</h1>
+
+<div class="row">
+  <span class="dot" id="wsDot"></span>
+  <span class="label" id="wsLabel">connecting to desktop</span>
+</div>
+<div class="row">
+  <span class="dot" id="recDot"></span>
+  <span class="label" id="recLabel">idle</span>
+</div>
+
+  <div class="row">
+  <span class="label">Language</span>
+  <select id="lang"></select>
+</div>
+
+<div class="warnbox" id="warn"></div>
+  <div class="pendingbox" id="pending">
+    <span id="pendingText"></span>
+  </div>
+
+<button id="start">Start listening</button>
+<button id="stop" disabled>Stop</button>
+
+<div class="card">
+  <h2>Heard</h2>
+  <div id="final"></div>
+  <div id="interim"></div>
+</div>
+
+<div class="card">
+  <h2>Transcript on this phone</h2>
+  <div id="transcript"></div>
+</div>
+
+<hr>
+
+<div class="card">
+  <h2>Desktop</h2>
+  <div class="row"><span class="label">Typing</span><span class="val" id="armState">unknown</span></div>
+  <div class="row"><span class="label">Hotkey</span><span class="val">Ctrl+Alt+D</span></div>
+</div>
+
+<div class="card">
+  <h2>Page</h2>
+  <div id="stats"></div>
+</div>
+
+<div class="card">
+  <h2>Diagnostics</h2>
+  <div class="row">
+    <input type="checkbox" id="logWords">
+    <span class="label">include spoken words in the report (off = privacy)</span>
+  </div>
+  <div class="row">
+    <button id="diagSend">Send to desktop</button>
+  </div>
+  <div class="row">
+    <button id="diagCopy">Copy report</button>
+  </div>
+  <div class="row">
+    <button id="diagToggle">Show log</button>
+  </div>
+  <pre id="diagOut" class="diagout"></pre>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var STALL_MS = 12000;
+  var RESTART_MS = 250;
+  var COMMIT_MS = 1400;
+  var POLL_MS = 1500;
+
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  var el = {
+    wsDot: document.getElementById('wsDot'),
+    wsLabel: document.getElementById('wsLabel'),
+    recDot: document.getElementById('recDot'),
+    recLabel: document.getElementById('recLabel'),
+    warn: document.getElementById('warn'),
+    start: document.getElementById('start'),
+    stop: document.getElementById('stop'),
+    final: document.getElementById('final'),
+    interim: document.getElementById('interim'),
+    transcript: document.getElementById('transcript'),
+    logWords: document.getElementById('logWords'),
+    diagSend: document.getElementById('diagSend'),
+    diagCopy: document.getElementById('diagCopy'),
+    diagToggle: document.getElementById('diagToggle'),
+    diagOut: document.getElementById('diagOut'),
+    pending: document.getElementById('pending'),
+    pendingText: document.getElementById('pendingText'),
+    armState: document.getElementById('armState'),
+    stats: document.getElementById('stats')
+  };
+
+  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0 };
+  var token = null, wantRun = false;
+  var history = [];
+  var pending = [];
+  var rec = null, lastEvent = 0, watchdog = null, restartTimer = null;
+  var sessionStartedAt = 0, lastFinal = '';
+  var lastInterim = '', lastDelivered = '', commitTimer = null;
+  var recSeq = 0;
+
+  function warn(msg) {
+    el.warn.textContent = msg;
+    el.warn.className = msg ? 'warnbox show' : 'warnbox';
+  }
+
+  function setRec(state, text) {
+    el.recLabel.textContent = text;
+    el.recDot.className = 'dot ' + state;
+  }
+
+  function langTriesNote() {
+    if (langIndex === 0) return '';
+    return 'fell back ' + langIndex + ' step' + (langIndex === 1 ? '' : 's');
+  }
+
+  function renderStats() {
+    var secs = sessionStartedAt ? Math.round((Date.now() - sessionStartedAt) / 1000) : 0;
+    el.stats.innerHTML =
+      'language <b>' + activeLang + '</b>' +
+        (langTriesNote() ? ' (' + langTriesNote() + ')' : '') + '<br>' +
+      'language fallbacks <b>' + stats.langTries + '</b><br>' +
+      'recognizer sessions <b>' + stats.sessions + '</b><br>' +
+      'watchdog stalls <b>' + stats.stalls + '</b><br>' +
+      'utterances heard <b>' + stats.heard + '</b><br>' +
+      'posted to desktop <b>' + stats.sent + '</b><br>' +
+      'waiting to send <b>' + pending.length + '</b><br>' +
+      'typed on desktop <b>' + serverTyped + '</b><br>' +
+      'recognizer errors <b>' + stats.errors + '</b><br>' +
+      'session uptime <b>' + secs + 's</b>';
+  }
+  setInterval(renderStats, 1000);
+
+  if (!SR) {
+    el.start.disabled = true;
+    setRec('bad', 'unsupported');
+    if (location.protocol === 'http:') {
+      warn('SpeechRecognition needs a secure (https) page. This page was opened over plain http, ' +
+           'so Safari hides the API. Reopen using the https:// address from the desktop window, ' +
+           'and install the certificate first.');
+    } else if (!window.isSecureContext) {
+      warn('This page is not a secure context, so Safari hides SpeechRecognition. ' +
+           'Install the certificate from the desktop, then reopen the page.');
+    } else {
+      warn('This browser has no SpeechRecognition. It needs Safari on iOS 14.5 or newer. ' +
+           'Chrome or Firefox on iOS cannot help: they do not expose the API.');
+    }
+  }
+
+  // ---- transport ------------------------------------------------------------
+  // Plain HTTP, same origin as the page. No handshake to get wrong, and the
+  // desktop learns the phone is alive from the status poll.
+
+  function send(msg) {
+    // Kept for the local transcript's benefit only; delivery is asynchronous.
+    if (pendingPost) return true;
+    return false;
+  }
+
+  var pendingPost = false;
+
+  function post(path, payload) {
+    return fetch(path, {
+      method: payload ? 'POST' : 'GET',
+      headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+      body: payload ? JSON.stringify(payload) : undefined,
+      cache: 'no-store'
+    }).then(function (r) {
+      if (!r.ok) throw new Error('http ' + r.status);
+      return r.json();
+    });
+  }
+
+  function pushToDesktop(text) {
+    pendingPost = true;
+    return post('/speak', { token: token, text: text })
+      .then(function () {
+        stats.sent++;
+        pending.length = 0;
+        updatePending();
+        return true;
+      })
+      .catch(function () {
+        pending.push(text);
+        updatePending();
+        return false;
+      })
+      .then(function (ok) {
+        pendingPost = false;
+        return ok;
+      });
+  }
+
+  // Polls for the arm state and flushes anything queued while offline.
+  function pollStatus() {
+    return post('/status').then(function (s) {
+      el.wsDot.className = 'dot ok';
+      el.wsLabel.textContent = 'connected to desktop';
+      el.armState.textContent = s.armed
+        ? 'ON - typing into focus'
+        : 'off - buffering';
+      serverTyped = s.typed;
+      if (pending.length > 0 && !pendingPost) {
+        var queued = pending.slice();
+        pending.length = 0;
+        var chain = Promise.resolve();
+        queued.forEach(function (t) {
+          chain = chain.then(function () { return pushToDesktop(t); });
+        });
+        return chain;
+      }
+    }).catch(function () {
+      el.wsDot.className = 'dot bad';
+      el.wsLabel.textContent = 'desktop not reachable';
+      el.armState.textContent = 'unknown';
+    });
+  }
+
+  var serverTyped = 0;
+
+  // ---- local transcript + unsent queue --------------------------------------
+
+  // Ships text to the desktop and records it locally. Order matters: the local
+  // record happens whether or not the socket accepts it.
+  function deliver(text, isInterim) {
+    if (!text) return;
+    if (isInterim && text === lastDelivered) return;
+    lastDelivered = text;
+    lastFinal = text;
+    el.final.textContent = text;
+    stats.heard++;
+
+    pushLocal(text, isInterim);
+    if (isInterim) return;
+    pushToDesktop(text);
+  }
+
+  // If Safari never marks a result final, commit whatever we last heard once
+  // the speaker goes quiet.
+  function scheduleCommit() {
+    clearTimeout(commitTimer);
+    commitTimer = setTimeout(function () {
+      commitTimer = null;
+      if (lastInterim) {
+        deliver(lastInterim, true);
+        lastInterim = '';
+      }
+    }, COMMIT_MS);
+  }
+
+  function pushLocal(text, isInterim) {
+    history.push({ t: text, time: new Date(), interim: !!isInterim });
+    if (history.length > 200) history.shift();
+    renderHistory();
+  }
+
+  function renderHistory() {
+    var rows = history.slice(-40).reverse();
+    el.transcript.textContent = '';
+    for (var i = 0; i < rows.length; i++) {
+      var line = document.createElement('div');
+      line.className = rows[i].interim ? 'tline pending-line' : 'tline';
+      var stamp = document.createElement('span');
+      stamp.className = 'ttime';
+      stamp.textContent = rows[i].time.toTimeString().slice(0, 8);
+      var body = document.createElement('span');
+      body.textContent = rows[i].t;
+      line.appendChild(stamp);
+      line.appendChild(body);
+      el.transcript.appendChild(line);
+    }
+  }
+
+  function updatePending() {
+    if (pending.length === 0) {
+      el.pending.style.display = 'none';
+    } else {
+      el.pending.style.display = 'block';
+      el.pendingText.textContent =
+        pending.length + ' utterance' + (pending.length === 1 ? '' : 's') +
+        ' waiting to send. Will retry automatically.';
+    }
+  }
+
+
+
+  function startPolling() {
+    pollStatus();
+    setInterval(pollStatus, POLL_MS);
+  }
+
+  // ---- recognizer -----------------------------------------------------------
+
+  var LANGS = [
+    { code: 'zh-HK', label: 'Cantonese / Chinese Hong Kong (zh-HK)', fall: ['yue-HK', 'zh-TW', 'en-US'] },
+    { code: 'yue-HK', label: 'Cantonese (yue-HK)', fall: ['zh-HK', 'zh-TW', 'en-US'] },
+    { code: 'zh-TW', label: 'Chinese - Taiwan (zh-TW)', fall: ['zh-HK', 'yue-HK', 'en-US'] },
+    { code: 'zh-CN', label: 'Chinese - Mandarin (zh-CN)', fall: ['en-US'] },
+    { code: 'en-US', label: 'English (US)', fall: ['en-GB'] },
+    { code: 'en-GB', label: 'English (UK)', fall: ['en-US'] },
+    { code: 'ja-JP', label: 'Japanese (ja-JP)', fall: ['en-US'] },
+    { code: 'ko-KR', label: 'Korean (ko-KR)', fall: ['en-US'] }
+  ];
+
+  // Safari is picky about Cantonese: yue-HK is the correct BCP-47 tag, but some
+  // iOS versions only accept zh-HK. If a language is rejected we walk this list
+  // rather than retrying the same code forever with no output.
+  var langChain = [];
+  var langIndex = 0;
+  var activeLang = 'zh-HK';
+  var wantedLang = 'zh-HK';
+
+  function beginLangChain() {
+    var chosen = chosenLang();
+    activeLang = chosen;
+    wantedLang = chosen;
+    langChain = [chosen];
+    for (var i = 0; i < LANGS.length; i++) {
+      if (LANGS[i].code === chosen && LANGS[i].fall) {
+        langChain = langChain.concat(LANGS[i].fall);
+        break;
+      }
+    }
+    langIndex = 0;
+  }
+
+  function nextLang() {
+    langIndex++;
+    if (langIndex >= langChain.length) return null;
+    var rejected = activeLang;
+    activeLang = langChain[langIndex];
+    stats.langTries++;
+    setRec('warn', 'trying ' + activeLang);
+    warn('iOS does not accept ' + rejected + ' for recognition. Trying ' + activeLang + '.');
+    rearm("lang-rejected")
+    return activeLang;
+  }
+
+  // ---- diagnostics ---------------------------------------------------------
+  // Records every recognizer lifecycle event with a timestamp, so a failure that
+  // only shows up on the phone can be diagnosed after the fact instead of
+  // guessed at. The transcript text is deliberately NOT included by default;
+  // it goes to the desktop log only if you turn "log words" on below.
+  var diag = [];
+  var DIAG_MAX = 400;
+  var diagT0 = Date.now();
+  var logWords = false;
+
+  function stamp() {
+    return ((Date.now() - diagT0) / 1000).toFixed(1);
+  }
+
+  function note(kind, detail) {
+    diag.push({ t: stamp(), kind: kind, d: detail === undefined ? '' : String(detail) });
+    if (diag.length > DIAG_MAX) diag.shift();
+  }
+
+  // Feature and environment facts that explain most failures on their own.
+  function noteEnvironment() {
+    note('env', 'ua=' + navigator.userAgent);
+    note('env', 'secure=' + window.isSecureContext + ' proto=' + location.protocol);
+    note('env', 'SR=' + (window.SpeechRecognition ? 'unprefixed' :
+                         window.webkitSpeechRecognition ? 'webkit' : 'ABSENT'));
+    note('env', 'audioWorklet=' + (!!(window.AudioContext || window.webkitAudioContext)));
+    note('env', 'wakeLock=' + ('wakeLock' in navigator));
+    note('env', 'speechSynthesis=' + (typeof window.speechSynthesis !== 'undefined'));
+    note('env', 'mediaDevices=' + !!navigator.mediaDevices);
+    note('env', 'visibility=' + document.visibilityState);
+    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      try {
+        navigator.mediaDevices.enumerateDevices().then(function (list) {
+          note('env', 'devices=' + list.length);
+        }).catch(function (e) { note('env', 'enumerateDevices failed: ' + e.name); });
+      } catch (e) { note('env', 'enumerateDevices threw: ' + e.message); }
+    }
+    if (window.SpeechRecognition && window.SpeechRecognition.available) {
+      try {
+        var p = window.SpeechRecognition.available({ langs: [chosenLang()], processLocally: false });
+        if (p && p.then) p.then(function (s) { note('env', 'available()=' + s); })
+          .catch(function (e) { note('env', 'available() threw ' + e.name); });
+      } catch (e) { note('env', 'available() sync throw: ' + e.message); }
+    }
+  }
+
+  // True when the call to start() happened inside a real user tap. iOS may
+  // require a gesture for every start, not just the first.
+  function inGesture() {
+    try {
+      return navigator.userActivation ? navigator.userActivation.isActive : null;
+    } catch (e) { return null; }
+  }
+
+  function diagReport() {
+    return {
+      token: token,
+      ua: navigator.userAgent,
+      secure: !!window.isSecureContext,
+      proto: location.protocol,
+      hasSR: !!SR,
+      lang: activeLang,
+      wanted: wantedLang,
+      chain: langChain.join('>'),
+      langTries: stats.langTries,
+      sessions: stats.sessions,
+      stalls: stats.stalls,
+      heard: stats.heard,
+      sent: stats.sent,
+      errors: stats.errors,
+      pending: pending.length,
+      wantRun: wantRun,
+      sinceStart: sessionStartedAt ? Math.round((Date.now() - sessionStartedAt) / 1000) : 0,
+      events: diag
+    };
+  }
+
+  function chosenLang() {
+    var sel = document.getElementById('lang');
+    return sel && sel.value ? sel.value : 'zh-HK';
+  }
+
+  function newRecognizer() {
+    var id = ++recSeq;
+    var gesture = inGesture();
+    note('new', '#' + id + ' lang=' + activeLang + ' gesture=' + gesture);
+
+    var r = new SR();
+    r.lang = activeLang;
+    r.continuous = true;
+    // Safari sometimes never sets isFinal. If we only trust final results we
+    // get no output at all, so interim results are the safety net.
+    r.interimResults = true;
+    r.maxAlternatives = 1;
+
+    // A retired recognizer has been replaced; its events must not touch state.
+    r.retired = false;
+
+    r.onstart = function () {
+      if (r.retired) return;
+      note('start', '#' + id);
+      lastEvent = Date.now();
+      setRec('ok', 'listening');
+    };
+
+    r.onresult = function (ev) {
+      if (r.retired) return;
+      note('result', '#' + id + ' results=' + ev.results.length +
+        ' from=' + ev.resultIndex);
+      lastEvent = Date.now();
+      var finalText = '';
+      var interimText = '';
+      for (var i = ev.resultIndex; i < ev.results.length; i++) {
+        var chunk = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) finalText += chunk;
+        else interimText += chunk;
+      }
+      finalText = finalText.trim();
+      interimText = interimText.trim();
+      note('text', 'final=' + finalText.length + ' interim=' + interimText.length +
+        (logWords && finalText ? ' words=[' + finalText + ']' : ''));
+
+      if (interimText) {
+        // Show speech immediately, before any final verdict arrives.
+        el.interim.textContent = interimText;
+        if (!finalText) {
+          lastInterim = interimText;
+          pushLocal(interimText, true);
+          scheduleCommit();
+        }
+      }
+
+      if (!finalText) return;
+      clearTimeout(commitTimer);
+      commitTimer = null;
+      lastInterim = '';
+      el.interim.textContent = '';
+      deliver(finalText, false);
+    };
+
+    r.onerror = function (ev) {
+      if (r.retired) return;
+      note('error', '#' + id + ' ' + (ev && ev.error ? ev.error : '?') +
+        (ev && ev.message ? ' ' + ev.message : ''));
+      lastEvent = Date.now();
+      stats.errors++;
+      var code = ev && ev.error ? ev.error : 'unknown';
+
+      // Safari ends a session with no-speech after a pause. That is normal for
+      // an idle recognizer, not a fault worth showing.
+      if (code === 'no-speech') {
+        setRec('ok', 'listening');
+        return;
+      }
+
+      if (code === 'language-not-supported') {
+        // Do not loop on a language the device will never accept.
+        if (nextLang() === null) {
+          wantRun = false;
+          el.start.disabled = false;
+          el.stop.disabled = true;
+          setRec('bad', 'no usable language');
+          warn('iOS rejected ' + wantedLang + ' and every fallback (' +
+               langChain.join(', ') + '). Pick a different language above and tap Start again.');
+        }
+        return;
+      }
+      if (code === 'not-allowed' || code === 'service-not-allowed') {
+        wantRun = false;
+        setRec('bad', 'mic blocked');
+        warn('Microphone access is blocked for this site. Allow the microphone in ' +
+             'Settings, then tap Start again.');
+        return;
+      }
+      if (code === 'network') {
+        setRec('warn', 'network retrying');
+        return;
+      }
+      setRec('warn', 'recovering (' + code + ')');
+    };
+
+    r.onend = function () {
+      if (r.retired) { note('end', '#' + id + ' (retired)'); return; }
+      note('end', '#' + id);
+      lastEvent = Date.now();
+      if (wantRun) scheduleRestart();
+    };
+
+    return r;
+  }
+
+  // Safari ends the session after a stretch of silence. That is normal for an
+  // idle recognizer, so simply re-arm; rearm() retires the old instance so the
+  // abort's own onend cannot schedule yet another restart.
+  function scheduleRestart() {
+    clearTimeout(restartTimer);
+    restartTimer = setTimeout(function () {
+      if (!wantRun) return;
+    rearm("session-ended")
+    }, RESTART_MS);
+  }
+
+  // A hang produces no event at all, so silence has to be treated as failure.
+  // Always abort and build a fresh instance; the same instance may be wedged.
+  watchdog = setInterval(function () {
+    if (!wantRun || !rec) return;
+    if (Date.now() - lastEvent < STALL_MS) return;
+    stats.stalls++;
+    setRec('warn', 'recovering from stall');
+    rearm("watchdog-stall")
+  }, 2000);
+
+  // Abort and immediately re-arm: used when the language changes, when the
+  // watchdog sees a hang, and when Safari ends the session after silence.
+  //
+  // The old recognizer is retired before abort() so its onend is ignored.
+  // Without that, abort() fires onend, which called scheduleRestart, which
+  // aborted again: every cycle created two recognizers until start() began
+  // throwing and recognition stopped permanently after any idle period.
+  function rearm(reason) {
+    clearTimeout(restartTimer);
+    note('rearm', reason || 'unspecified' + ' gesture=' + inGesture());
+    var old = rec;
+    rec = null;
+    if (old) old.retired = true;
+    try { if (old) old.abort(); } catch (e) { note('abortThrew', e.message); }
+
+    rec = newRecognizer();
+    stats.sessions++;
+    try {
+      rec.start();
+      note('startCalled', 'ok gesture=' + inGesture());
+      lastEvent = Date.now();
+    } catch (e) {
+      note('startThrew', e.name + ': ' + e.message);
+      setRec('warn', 'restart failed, retrying');
+      scheduleRestart();
+    }
+  }
+
+  function start() {
+    if (!SR) return;
+    warn('');
+    note('ui', 'start tapped, gesture=' + inGesture());
+    wantRun = true;
+    sessionStartedAt = Date.now();
+    beginLangChain();
+    el.start.disabled = true;
+    el.stop.disabled = false;
+    rec = newRecognizer();
+    stats.sessions++;
+    setRec('warn', 'starting (' + activeLang + ')');
+    try {
+      rec.start();
+      lastEvent = Date.now();
+    } catch (e) {
+      setRec('bad', 'start failed');
+      warn('Could not start the recognizer: ' + e.message);
+    }
+  }
+
+  function stop() {
+    wantRun = false;
+    clearTimeout(restartTimer);
+    clearTimeout(commitTimer);
+    commitTimer = null;
+    lastInterim = '';
+    var old = rec;
+    rec = null;
+    if (old) old.retired = true;
+    try { if (old) old.abort(); } catch (e) {}
+    el.start.disabled = false;
+    el.stop.disabled = true;
+    el.interim.textContent = '';
+    setRec('', 'stopped');
+  }
+
+  el.start.addEventListener('click', start);
+  el.stop.addEventListener('click', stop);
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && wantRun && (!rec || Date.now() - lastEvent > STALL_MS)) {
+      try { if (rec) rec.abort(); } catch (e) {}
+      rec = newRecognizer();
+      stats.sessions++;
+      try { rec.start(); } catch (e) { scheduleRestart(); }
+    }
+  });
+
+  window.addEventListener('pagehide', function () {
+    wantRun = false;
+    clearTimeout(commitTimer);
+    try { if (rec) rec.abort(); } catch (e) {}
+  });
+
+  // ---- diagnostics UI -------------------------------------------------------
+
+  function renderDiag() {
+    var rows = [];
+    for (var i = 0; i < diag.length; i++) {
+      rows.push(diag[i].t + 's  ' + diag[i].kind + '  ' + diag[i].d);
+    }
+    el.diagOut.textContent = rows.join('\n');
+    el.diagOut.scrollTop = el.diagOut.scrollHeight;
+  }
+
+  function reportText() {
+    var r = diagReport();
+    return JSON.stringify(r, null, 1);
+  }
+
+  el.logWords.addEventListener('change', function () {
+    logWords = el.logWords.checked;
+    note('ui', 'logWords=' + logWords);
+  });
+
+  el.diagToggle.addEventListener('click', function () {
+    if (el.diagOut.className.indexOf('show') >= 0) {
+      el.diagOut.className = 'diagout';
+      el.diagToggle.textContent = 'Show log';
+    } else {
+      renderDiag();
+      el.diagOut.className = 'diagout show';
+      el.diagToggle.textContent = 'Hide log';
+    }
+  });
+
+  el.diagCopy.addEventListener('click', function () {
+    var text = reportText();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        el.diagCopy.textContent = 'Copied';
+      }).catch(function () { showDiag(text); });
+    } else {
+      showDiag(text);
+    }
+  });
+
+  function showDiag(text) {
+    renderDiag();
+    el.diagOut.className = 'diagout show';
+    el.diagToggle.textContent = 'Hide log';
+    el.diagOut.textContent = text;
+  }
+
+  el.diagSend.addEventListener('click', function () {
+    note('ui', 'manual report send');
+    post('/diag', diagReport()).then(function () {
+      el.diagSend.textContent = 'Sent - see desktop log';
+    }).catch(function (e) {
+      el.diagSend.textContent = 'Send failed: ' + e.message;
+    });
+  });
+
+  // Idle, the recognizer gets no events at all. A periodic beacon makes that
+  // visible in the report instead of looking like a dead page.
+  setInterval(function () {
+    if (wantRun) note('beat', 'sessions=' + stats.sessions + ' heard=' + stats.heard +
+      ' sinceLast=' + Math.round((Date.now() - lastEvent) / 1000) + 's');
+  }, 15000);
+
+  // ---- boot -----------------------------------------------------------------
+
+  (function fillLangs() {
+    var sel = document.getElementById('lang');
+    if (!sel) return;
+    for (var i = 0; i < LANGS.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = LANGS[i].code;
+      opt.textContent = LANGS[i].label;
+      sel.appendChild(opt);
+    }
+    var saved = null;
+    try { saved = localStorage.getItem('dictation-lang'); } catch (e) {}
+    // zh-HK first: it is the tag Apple's own dictation uses for Cantonese, and
+    // yue-HK is only tried if the device rejects it.
+    sel.value = saved || 'zh-HK';
+    activeLang = sel.value;
+    sel.addEventListener('change', function () {
+      try { localStorage.setItem('dictation-lang', sel.value); } catch (e) {}
+      if (wantRun) {
+        beginLangChain();
+    rearm("lang-change")
+      }
+    });
+  })();
+
+  post('/config')
+    .then(function (cfg) {
+      token = cfg.token;
+      note('ui', 'config loaded');
+      noteEnvironment();
+      el.wsLabel.textContent = 'loading';
+      startPolling();
+    })
+    .catch(function () {
+      note('ui', 'config load failed');
+      warn('Could not reach the desktop. Open this page using the https address from the desktop window.');
+      el.wsDot.className = 'dot bad';
+      el.wsLabel.textContent = 'desktop not reachable';
+    });
+
+  // Ship diagnostics automatically when recognition fails, so a bug that only
+  // reproduces on the phone still leaves a trace in the desktop log.
+  var lastReport = 0;
+  setInterval(function () {
+    if (!wantRun) return;
+    if (stats.errors === 0 || stats.heard > 0) return;
+    if (Date.now() - lastReport < 45000) return;
+    lastReport = Date.now();
+    note('auto', 'reporting: errors with nothing heard');
+    post('/diag', diagReport()).catch(function () { });
+  }, 20000);
+})();
+</script>
+</body>
+</html>
