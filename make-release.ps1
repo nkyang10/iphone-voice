@@ -49,10 +49,16 @@ if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
 
 Write-Host "compiled $exe"
 
-# Generate the certificate by running the exe briefly, then stop it. The cert
-# is machine-specific, so it is produced per release machine rather than shipped
-# in git.
-Write-Host "generating the certificate"
+# Smoke-test a first run in a scratch directory, then stop it. This proves the
+# exe starts with nothing beside it and mints its own certificate, which is the
+# only setup a recipient of this package ever performs.
+#
+# The certificate deliberately does NOT travel with the release. It has to be
+# machine-specific: the SAN lists the addresses of whichever PC minted it, and a
+# private key handed around with a download is a private key in public. Each
+# recipient generates their own on first run and sends their own .cer to their
+# own phone.
+Write-Host "testing a first run"
 $runDir = Join-Path $env:TEMP "db-release-$version"
 if (Test-Path $runDir) { Remove-Item $runDir -Recurse -Force }
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
@@ -64,36 +70,27 @@ $certReady = $false
 for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep -Milliseconds 250
     $cer = Join-Path $runDir 'data\dictation-bridge.cer'
-    if (Test-Path $cer) {
-        $len = (Get-Item $cer).Length
-        if ($len -gt 100) { $certReady = $true; break }
+    $pfx = Join-Path $runDir 'data\dictation-bridge.pfx'
+    if ((Test-Path $cer) -and (Test-Path $pfx)) {
+        if ((Get-Item $cer).Length -gt 100) { $certReady = $true; break }
     }
 }
 if (-not $proc.HasExited) { $proc | Stop-Process -Force }
 Start-Sleep -Milliseconds 400
 
-if (-not $certReady) { throw "the app did not produce a certificate" }
-# The app reuses the saved certificate, so shipping the data folder means the
-# certificate we hand the user is the one it actually serves with. Shipping only
-# the .cer would be useless: a first run with no data\ folder mints a different
-# certificate and the phone would trust the wrong one.
-New-Item -ItemType Directory -Path (Join-Path $outDir 'data') -Force | Out-Null
-Copy-Item (Join-Path $runDir 'data\dictation-bridge.cer') $outDir
-Copy-Item (Join-Path $runDir 'data\dictation-bridge.pfx') (Join-Path $outDir 'data')
-# Also inside data\, because that is where the app looks on an upgrade and
-# because a user's instructions will point at it.
-Copy-Item (Join-Path $runDir 'data\dictation-bridge.cer') (Join-Path $outDir 'data')
+if (-not $certReady) { throw "the app did not create its own certificate on first run" }
 
-# Prove the two are the same certificate. Shipping a .cer that does not match
-# the served one means the phone trusts nothing and the app is unusable.
-$shipped = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
-    (Join-Path $outDir 'dictation-bridge.cer')
+# The certificate it just made must be the one it would serve. A first run that
+# writes a .cer which does not match its own .pfx would leave the phone trusting
+# nothing, with nothing on screen to explain why.
+$minted = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
+    (Join-Path $runDir 'data\dictation-bridge.cer')
 $served = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
-    (Join-Path $outDir 'data\dictation-bridge.pfx'), 'dictation-bridge'
-if ($shipped.Thumbprint -ne $served.Thumbprint) {
-    throw "shipped certificate does not match the one the app will serve"
+    (Join-Path $runDir 'data\dictation-bridge.pfx'), 'dictation-bridge'
+if ($minted.Thumbprint -ne $served.Thumbprint) {
+    throw "the certificate written for the user is not the one the app will serve"
 }
-Write-Host "certificate ready and verified to match"
+Write-Host "first run created a usable certificate, verified to match"
 
 # Confirm the page really is inside the exe, so a release can never ship with
 # the wrong page compiled in.
@@ -116,10 +113,20 @@ if ($text -notmatch 'QRCoder') {
 }
 Write-Host "verified the QR encoder is compiled in"
 
+# Nothing sensitive may reach the release folder. A .pfx is the certificate
+# private key: publishing one lets anyone impersonate the certificate, and this
+# package is meant to be downloadable.
+$leaked = @(Get-ChildItem $outDir -Recurse -File -Include *.pfx, *.cer -ErrorAction SilentlyContinue)
+if ($leaked.Count -gt 0) {
+    throw "the release must not contain keys or certificates: $($leaked.Name -join ', ')"
+}
+
 Remove-Item $runDir -Recurse -Force -ErrorAction SilentlyContinue
 
-# The quick-start guide and the screenshots go in beside the exe. The README is
-# written as plain text so it opens by double-click with nothing installed.
+# The quick-start guide goes in beside the exe. The README is written as plain
+# text so it opens by double-click with nothing installed. The screenshots are
+# deliberately left out: they are served from the repository, and a folder
+# someone unzips on a phone-carrying desk does not need them.
 $readme = @'
 # Dictation Bridge
 
@@ -134,10 +141,20 @@ No typing, no leaning over the keyboard, no stopping what you're doing.
 That's the whole installation. No installer, no runtime, no setup wizard. A small
 panel appears near the middle of your screen.
 
-**2. On your phone, send it the certificate.**
+Leave it running. It needs to be running whenever you want to dictate.
 
-The file `dictation-bridge.cer` is in this folder. AirDrop it, email it to yourself,
-or put it in Drive, however is easiest. Tap it on the phone when it arrives.
+**2. Get the certificate off the PC and onto the phone.**
+
+The app just made you your own certificate. It is at:
+
+    data\dictation-bridge.cer
+
+Get that one file to your phone however is easiest. AirDrop it, email it to
+yourself, put it in Drive, or copy it over USB. Tap it on the phone when it
+arrives.
+
+It has to be *your* file, not someone else's. The app makes a certificate
+covering your PC's current addresses, and the phone has to trust that one.
 
 Then on the phone:
 
@@ -167,6 +184,7 @@ nothing is lost.
 | | |
 | --- | --- |
 | Start / stop typing | Ctrl+Alt+D, or click the panel button |
+| Open the page on the phone | Scan the QR code in the panel |
 | Get the panel back | Click the tray icon, bottom right |
 | Move it | Drag it. It remembers where you left it |
 | Use a different key | Expand the panel, press Change hotkey |
@@ -183,6 +201,11 @@ which it settled on.
 
 "No speech recognition" on the page: the certificate is not trusted. Do step 3, which
 is a different place from step 2.
+
+Your address changed and dictation stopped working: the certificate only covers the
+addresses the PC had when it was made. The app notices and issues a new one, and says
+so in `data\dictation-bridge.log`. Send the new `data\dictation-bridge.cer` to the phone
+and install it again.
 
 Nothing types: the panel must say LISTENING.
 
@@ -219,11 +242,6 @@ just forwards the resulting text to your PC.
 '@
 Set-Content -Path (Join-Path $outDir 'README.txt') -Value $readme -Encoding UTF8
 
-foreach ($shot in @('panel-expanded.png', 'panel-collapsed.png', 'phone-page.png')) {
-    $src = Join-Path $root "docs\$shot"
-    if (Test-Path $src) { Copy-Item $src $outDir }
-}
-
 $size = [math]::Round((Get-Item $exe).Length / 1KB, 1)
 Write-Host ""
 Write-Host "release ready: $outDir"
@@ -232,3 +250,4 @@ Get-ChildItem $outDir | ForEach-Object {
 }
 Write-Host ""
 Write-Host "  exe $size KB, nothing to install"
+Write-Host "  no keys or certificates: the app mints your own on first run"

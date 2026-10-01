@@ -24,15 +24,19 @@ Languages: [English](README.md) · [繁體中文](README.zh-Hant.md) · [简体�
 **1. On the PC**
 
 Download `DictationBridge.exe` and run it. That's the whole installation — no installer,
-no runtime, no setup. A small panel appears near the middle of your screen.
+no runtime, no setup. A small panel appears near the middle of your screen. Leave it
+running; it needs to be running whenever you want to dictate.
+
+The download is just the one file. The certificate your phone needs is created by your
+own copy on that first run, so everyone gets one that matches their own machine.
 
 **2. On the phone**
 
-Point the phone's camera at the QR code on the panel and tap the link that appears.
-That opens the address, which looks like `https://192.168.1.162:8080/`.
+Point the camera at the QR code on the panel and tap the link that appears. That opens
+the address, which looks like `https://192.168.1.162:8080/`.
 
-If your camera won't read the code, the same address is written beside it — type it
-into Safari instead.
+If your camera won't read the code, the same address is written beside it — type it into
+Safari instead.
 
 The phone will ask you to install a certificate. Tap through it, then come back. This
 happens **once**, and the detailed steps are in
@@ -133,9 +137,12 @@ iOS only allows voice dictation on a secure page, and its version of Safari has 
 "proceed anyway" button. So the desktop runs a small HTTPS server and you trust its
 certificate once.
 
-**Send the certificate to the phone.** It's at `data\dictation-bridge.cer`; the app prints
-the exact path on startup. AirDrop it, email it, or copy it however you like. Tap it on
-the phone.
+**Get your certificate.** Run the app once, then take `data\dictation-bridge.cer` from the
+`data\` folder it created. The app prints the exact path on startup.
+
+**Send it to the phone.** AirDrop it, email it to yourself, or copy it however you like.
+Tap it on the phone. It has to be your own file: the certificate covers the addresses of
+the PC that made it.
 
 **Install it:**
 

@@ -80,19 +80,26 @@ in the binary, which catches a release built without the vendored source.
 .\make-release.ps1
 ```
 
-Produces `release\DictationBridge-<version>\` containing the exe with the page compiled
-into it, a `README.txt` for whoever unzips it, the screenshots, and the certificate to
-send to a phone.
+Produces `release\DictationBridge-<version>\` containing two files: the exe with the page
+and the QR encoder compiled in, and a `README.txt` for whoever unzips it.
 
-The script compiles into the release folder, generates a certificate by running the exe
-briefly, and then **verifies two things that would otherwise ship broken**: that the page
-really is embedded in the exe, and that the shipped `.cer` is the same certificate the app
-will serve. Shipping only the `.cer` looks right but is useless, because a first run with
-no `data\` folder mints a different certificate and the phone would trust the wrong one.
-That is why `data\` travels with the release.
+**No certificate travels with the release.** The app mints one on the recipient's first
+run, in `data\`, and their `README.txt` points them at their own file. This is deliberate:
 
-`release\` is gitignored. It holds a private key and is specific to the machine that built
-it, so it is regenerated per release rather than committed.
+- the certificate is machine-specific. Its SAN lists the addresses of whichever PC
+  created it, so one built on a different machine would not cover the recipient's
+- a `.pfx` is the private key. Publishing one with a download means anyone can
+  impersonate that certificate
+
+The script **verifies two things that would otherwise ship broken**: that the page really
+is embedded in the exe, and that a first run in an empty directory creates a `.cer` and a
+`.pfx` that match each other. It also fails the build outright if any `.pfx` or `.cer`
+ends up in the release folder, so a regression cannot quietly reintroduce a key.
+
+The screenshots are not copied. `docs\` is served from the repository, and a folder
+someone unzips next to their phone does not need them.
+
+`release\` is gitignored, and now contains nothing that should be published by accident.
 
 ## Documentation
 

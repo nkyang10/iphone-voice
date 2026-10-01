@@ -186,6 +186,11 @@ and do not add features that assume it is.
   is its public half. Both are generated at runtime, so neither belongs in the
   repository, and the `.pfx` must never be committed. `web/index.html` is the only
   source of truth for the page; `build.ps1` embeds it.
+- **The release folder contains no certificate at all**, only the exe and its
+  README. Each recipient mints their own on first run. This is not an oversight:
+  a certificate is machine-specific, and a `.pfx` handed out with a download is a
+  private key in public. `make-release.ps1` throws if any `.pfx` or `.cer` reaches
+  `release\`, so keep it that way rather than adding one back for convenience.
 
 **The certificate is preserved between runs.** `Certs.Ensure` reuses the saved
 `.pfx` unless it is near expiry or stops covering the current address, so a
