@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Authentication;
 using System.Security.Cryptography;
@@ -637,11 +638,6 @@ namespace DictationBridge
         // port keeps a single, proven TLS path.
         public static void StartAll(Bridge bridge, string token, int port, byte[] pfx)
         {
-            string pagePath = System.IO.Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory, "index.html");
-            if (!File.Exists(pagePath)) pagePath = System.IO.Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory, "web", "index.html");
-
             // One certificate for the life of the process. Per-connection imports
             // made things worse, not better.
             X509Certificate2 cert = null;
@@ -667,14 +663,14 @@ namespace DictationBridge
                     TcpClient client;
                     try { client = listener.AcceptTcpClient(); }
                     catch (Exception) { break; }
-                    new Thread(() => Handle(client, bridge, token, pagePath, cert, port))
+                    new Thread(() => Handle(client, bridge, token, null, cert, port))
                     { IsBackground = true }.Start();
                 }
             }) { IsBackground = true }.Start();
         }
 
         private static void Handle(TcpClient client, Bridge bridge, string token,
-            string pagePath, X509Certificate2 cert, int servePort)
+            string unusedPath, X509Certificate2 cert, int servePort)
         {
             try
             {
@@ -769,9 +765,7 @@ namespace DictationBridge
 
                 if (path == "/" || path == "/index.html")
                 {
-                    outBody = File.Exists(pagePath)
-                        ? File.ReadAllText(pagePath)
-                        : "index.html not found next to the exe";
+                    outBody = Page();
                     outType = "text/html; charset=utf-8";
                 }
                 else if (path == "/config")
@@ -853,6 +847,58 @@ namespace DictationBridge
             {
                 try { client.Close(); } catch (Exception) { }
             }
+        }
+
+        // The page is compiled into the executable, so this is one file to copy
+        // and there is no way for a stray index.html in the folder to change what
+        // the phone is served. Read once and cached: it never changes at runtime.
+        private static string _page;
+
+        public static string Page()
+        {
+            if (_page != null) return _page;
+            try
+            {
+                using (Stream s = Assembly.GetExecutingAssembly()
+                    .GetManifestResourceStream("DictationBridge.page.html"))
+                {
+                    if (s != null)
+                    {
+                        using (var reader = new StreamReader(s, Encoding.UTF8))
+                        {
+                            _page = reader.ReadToEnd();
+                            Log.Write("serving the embedded page (" + _page.Length + " bytes)");
+                            return _page;
+                        }
+                    }
+                }
+                Log.Write("WARN: embedded page resource missing");
+            }
+            catch (Exception e)
+            {
+                Log.Write("WARN: could not read embedded page: " + e.Message);
+            }
+
+            // Built without the embedded resource: fall back to a file so the
+            // source tree still works.
+            foreach (string relative in new[] { "index.html", "web\\index.html" })
+            {
+                string candidate = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, relative);
+                if (System.IO.File.Exists(candidate))
+                {
+                    _page = System.IO.File.ReadAllText(candidate);
+                    Log.Write("serving index.html from disk (" + _page.Length + " bytes)");
+                    return _page;
+                }
+            }
+
+            _page = "<!DOCTYPE html><meta charset=utf-8>" +
+                    "<title>Dictation Bridge</title>" +
+                    "<p style='font:17px system-ui;padding:24px'>" +
+                    "The page could not be loaded. Restart the app, or rebuild it " +
+                    "with build.ps1 so the page is embedded.</p>";
+            return _page;
         }
 
         // Tiny extractor for the two fields we care about. Avoids a JSON library
@@ -1327,12 +1373,16 @@ namespace DictationBridge
         [STAThread]
         private static int Main(string[] args)
         {
+            // One port serves the page, the status poll and dictation, so --port
+            // is the only knob. The old --ws port is no longer used.
             int httpPort = 8080;
-            int wsPort = 8765;
             for (int i = 0; i < args.Length - 1; i++)
             {
-                if (args[i] == "--http") int.TryParse(args[i + 1], out httpPort);
-                if (args[i] == "--ws") int.TryParse(args[i + 1], out wsPort);
+                if (args[i] == "--port" || args[i] == "--http")
+                {
+                    int parsed;
+                    if (int.TryParse(args[i + 1], out parsed)) httpPort = parsed;
+                }
             }
 
             string token = Guid.NewGuid().ToString("N").Substring(0, 8);
