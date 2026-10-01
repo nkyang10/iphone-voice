@@ -97,6 +97,38 @@ namespace DictationBridge
         public static extern uint timeGetTime();
     }
 
+    // Everything the app generates lives in one folder next to the exe, so the
+    // program itself stays a single untouched file and everything disposable can
+    // be deleted in one go.
+    internal static class Store
+    {
+        private const string FolderName = "data";
+
+        public static string Dir
+        {
+            get
+            {
+                string dir = System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory, FolderName);
+                try
+                {
+                    if (!System.IO.Directory.Exists(dir))
+                        System.IO.Directory.CreateDirectory(dir);
+                }
+                catch (Exception e)
+                {
+                    Log.Write("WARN: could not create " + dir + ": " + e.Message);
+                }
+                return dir;
+            }
+        }
+
+        public static string File(string name)
+        {
+            return System.IO.Path.Combine(Dir, name);
+        }
+    }
+
     internal static class Certs
     {
         public const string PfxPassword = "dictation-bridge";
@@ -114,9 +146,8 @@ namespace DictationBridge
         // install the new one.
         public static X509Certificate2 Ensure(string ip, out string cerPath)
         {
-            string dir = AppDomain.CurrentDomain.BaseDirectory;
-            string pfxPath = System.IO.Path.Combine(dir, "dictation-bridge.pfx");
-            string caCerPath = System.IO.Path.Combine(dir, "dictation-bridge.cer");
+            string pfxPath = Store.File("dictation-bridge.pfx");
+            string caCerPath = Store.File("dictation-bridge.cer");
             cerPath = caCerPath;
 
             // Reuse the saved certificate unless it is about to expire or it does
@@ -278,8 +309,7 @@ namespace DictationBridge
     internal static class Log
     {
         private static readonly object Gate = new object();
-        private static readonly string Path =
-            System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dictation-bridge.log");
+        private static readonly string Path = Store.File("dictation-bridge.log");
 
         public static void Write(string message)
         {
@@ -300,8 +330,7 @@ namespace DictationBridge
 
         // Phone diagnostics go to their own file: verbose, and one write per
         // report rather than interleaved with the running log.
-        private static readonly string DiagPath =
-            System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diagnostics.log");
+        private static readonly string DiagPath = Store.File("diagnostics.log");
 
         // Keep the file from growing forever: keep the newest chunk and rename
         // the old one. Phone diagnostics are small, but this runs daily.
@@ -953,11 +982,12 @@ namespace DictationBridge
             }
 
             // Built without the embedded resource: fall back to a file so the
-            // source tree still works.
+            // source tree still works. Only for development, never on a normal
+            // install where the resource is compiled in.
             foreach (string relative in new[] { "index.html", "web\\index.html" })
             {
                 string candidate = System.IO.Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, relative);
+                    Environment.CurrentDirectory, relative);
                 if (System.IO.File.Exists(candidate))
                 {
                     _page = System.IO.File.ReadAllText(candidate);
@@ -1118,9 +1148,8 @@ namespace DictationBridge
         {
             try
             {
-                string path = System.IO.Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, PrefFile);
-                if (!System.IO.File.Exists(path)) return;
+            string path = Store.File(PrefFile);
+            if (!System.IO.File.Exists(path)) return;
                 string[] parts = System.IO.File.ReadAllText(path).Split('+');
                 uint k = 0;
                 if (parts.Length < 2) return;
@@ -1148,8 +1177,7 @@ namespace DictationBridge
         {
             try
             {
-                string path = System.IO.Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, PrefFile);
+                string path = Store.File(PrefFile);
                 string s = "";
                 if ((_mods & Native.MOD_CONTROL) != 0) s += "Ctrl+";
                 if ((_mods & Native.MOD_ALT) != 0) s += "Alt+";
@@ -1418,8 +1446,7 @@ namespace DictationBridge
             Point? remembered = null;
             try
             {
-                string path = System.IO.Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, PositionFile);
+                string path = Store.File(PositionFile);
                 if (System.IO.File.Exists(path))
                 {
                     string[] parts = System.IO.File.ReadAllText(path).Split(',');
@@ -1465,8 +1492,7 @@ namespace DictationBridge
             try
             {
                 System.IO.File.WriteAllText(
-                    System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, PositionFile),
-                    Location.X + "," + Location.Y);
+                    Store.File(PositionFile), Location.X + "," + Location.Y);
             }
             catch (Exception) { }
         }
@@ -1977,6 +2003,8 @@ var quitButton = FlatButton("Quit", (s, e) => Quit());
 
             Console.WriteLine("Dictation Bridge");
             Console.WriteLine("===============");
+            Console.WriteLine("Your files are in: " + Store.Dir);
+            Console.WriteLine();
 
             string ip = PrimaryAddress();
             X509Certificate2 cert = null;
@@ -2015,8 +2043,10 @@ var quitButton = FlatButton("Quit", (s, e) => Quit());
             if (secure)
             {
                 Console.WriteLine("  On the iPhone, once:");
-                Console.WriteLine("   1. Send " + System.IO.Path.GetFileName(caCerPath) +
-                                  " to the phone and tap it to install.");
+                Console.WriteLine("   1. Send this file to the phone and tap it:");
+                Console.WriteLine();
+                Console.WriteLine("        " + caCerPath);
+                Console.WriteLine();
                 Console.WriteLine("   2. Settings > General > VPN & Device Management > Install.");
                 Console.WriteLine("   3. Settings > General > About > Certificate Trust Settings");
                 Console.WriteLine("      > enable the Dictation Bridge certificate.");

@@ -21,6 +21,23 @@ And the page on the phone:
 
 ![The dictation page](docs/phone-page.png)
 
+## Files it creates
+
+Everything lands in a `data\` folder next to the exe, created on first run. The exe
+itself is never modified.
+
+| File | What it is |
+| --- | --- |
+| `dictation-bridge.cer` | The certificate to install on the phone. Public only, no private key. |
+| `dictation-bridge.pfx` | Same certificate with its private key. Needed to serve HTTPS. |
+| `dictation-bridge.log` | What the desktop is doing. |
+| `diagnostics.log` | Reports from the phone. Rotates to `diagnostics.log.1` at 4 MB. |
+| `dictation-bridge-hotkey.txt` | The shortcut you chose. |
+| `dictation-bridge-position.txt` | Where you left the panel. |
+
+Delete the whole folder to reset everything, including the certificate. Do **not**
+delete it while the app is running.
+
 ## Using it
 
 1. Run `DictationBridge.exe`. A floating panel appears, plus a tray icon.
@@ -46,9 +63,10 @@ Safari does, so the certificate has to be installed once:
 **You only do this once.** The desktop keeps its certificate between runs and reuses
 it, so restarting the app or rebooting the PC never needs a reinstall.
 
-The certificate also covers the name `dictation-bridge.local`. If the phone can resolve
-that, use `https://dictation-bridge.local:8080/` instead of the IP and the same
-certificate keeps working on **any** network, even a different address. It does not
+The file to install is `data\dictation-bridge.cer`, and the app prints its full path on
+startup. The certificate also covers the name `dictation-bridge.local`. If the phone
+can resolve that, use `https://dictation-bridge.local:8080/` instead of the IP and the
+same certificate keeps working on **any** network, even a different address. It does not
 resolve everywhere, so treat the IP as the reliable route and the name as a bonus.
 
 If the address changes to one the certificate does not list, the desktop logs

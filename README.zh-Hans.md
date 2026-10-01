@@ -13,6 +13,21 @@
 
 ![手机上的页面](docs/phone-page.png)
 
+## 它会产生的文件
+
+所有内容都放在 exe 旁边的 `data\` 文件夹里，首次运行就会创建。exe 本身不会被修改。
+
+| 文件 | 说明 |
+| --- | --- |
+| `dictation-bridge.cer` | 需要安装到手机上的证书，只有公开部分，没有私钥。 |
+| `dictation-bridge.pfx` | 同一张证书连同私钥，提供 HTTPS 需要用到。 |
+| `dictation-bridge.log` | 电脑端的运行记录。 |
+| `diagnostics.log` | 手机提交的报告，达到 4 MB 会改名为 `diagnostics.log.1`。 |
+| `dictation-bridge-hotkey.txt` | 你选择的快捷键。 |
+| `dictation-bridge-position.txt` | 面板停放的位置。 |
+
+删除整个文件夹等于完全重置，包括证书。但程序运行期间请不要删除。
+
 ## 使用方法
 
 1. 运行 `DictationBridge.exe`，会出现一个小浮动面板，右下角还有托盘图标。
@@ -28,7 +43,7 @@
 iOS 只在安全页面上开放语音识别，所以程序用自签名证书走 HTTPS。iOS Safari 没有
 macOS Safari 那个「仍要继续」按钮，因此证书需要安装一次：
 
-1. 把 `dictation-bridge.cer` 传到手机并点击它。
+1. 把 `data\dictation-bridge.cer` 传到手机并点击它。
 2. 设置 > 通用 > VPN 与设备管理 > 点击描述文件 > 安装。
 3. 设置 > 通用 > 关于本机 > 信任证书设置 > 开启它。
 4. 打开第 2 步的网址。

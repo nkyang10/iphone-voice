@@ -13,6 +13,21 @@
 
 ![手機上面嗰頁](docs/phone-page.png)
 
+## 佢會產生嘅檔案
+
+所有嘢都放喺 exe 旁邊嘅 `data\` 資料夾，第一次行就會開。exe 本身唔會俾人改。
+
+| 檔案 | 係咩 |
+| --- | --- |
+| `dictation-bridge.cer` | 要裝去手機嗰張證書，只有公開部分，冇私密鎖匙。 |
+| `dictation-bridge.pfx` | 同一張證書連私密鎖匙，行 HTTPS 要用。 |
+| `dictation-bridge.log` | 電腦而家做緊咩。 |
+| `diagnostics.log` | 手機交嚟嘅報告。去到 4 MB 會改名做 `diagnostics.log.1`。 |
+| `dictation-bridge-hotkey.txt` | 你揀嘅快捷鍵。 |
+| `dictation-bridge-position.txt` | 面板擺咗喺邊。 |
+
+成個資料夾刪咗就等於全部重設，連證書都冇咗。不過程式行緊嘅時候唔好刪。
+
 ## 點用
 
 1. 執行 `DictationBridge.exe`，會彈一個細浮動面板，右下角亦有圖示。
@@ -28,7 +43,7 @@
 iOS 淨係喺安全頁面先會開放語音辨識，所以程式用自簽憑證行 HTTPS。iOS Safari 冇
 macOS Safari 嗰個「繼續前往」掣，所以憑證要裝一次：
 
-1. 將 `dictation-bridge.cer` 傳去手機，撳開佢。
+1. 將 `data\dictation-bridge.cer` 傳去手機，撳開佢。
 2. 設定 > 一般 > VPN 與裝置管理 > 撳個描述檔 > 安裝。
 3. 設定 > 一般 > 關於本機 > 信任證書設定 > 開啟佢。
 4. 開步驟 2 嗰個網址。

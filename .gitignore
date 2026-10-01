@@ -1,6 +1,12 @@
-# Private key for the self-signed HTTPS certificate. Never commit this: anyone
-# with it can impersonate the desktop to a phone that trusts it.
+# Private key for the self-signed HTTPS certificate, and the certificate itself.
+# Both are generated at runtime into data\ and must never be committed.
 *.pfx
+*.cer
+data/
+
+# The served page is compiled into the exe by build.ps1; web\index.html is the
+# source of truth. desktop\index.html is only written for local editing.
+desktop/index.html
 
 # Local runtime output.
 *.log
@@ -13,6 +19,3 @@ dictation-bridge-position.txt
 
 # Compiled binary. The source is the artifact; build with build.ps1.
 *.exe
-
-# The served page is a copy of web/index.html. Committing both invites drift.
-desktop/index.html
