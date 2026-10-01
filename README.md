@@ -9,6 +9,18 @@ typing actually happens, so the phone is a set-and-forget device after the first
 Nothing leaves your network. Recognition audio goes to Apple (that is how Safari works);
 the resulting text goes only to your own PC.
 
+Languages: [English](README.md) · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
+
+![The Windows panel, expanded and armed](docs/panel-expanded.png)
+
+The panel above, expanded and armed. Collapsed it is a single strip:
+
+![The collapsed strip](docs/panel-collapsed.png)
+
+And the page on the phone:
+
+![The dictation page](docs/phone-page.png)
+
 ## Using it
 
 1. Run `DictationBridge.exe`. A floating panel appears, plus a tray icon.
