@@ -606,7 +606,7 @@
         // Do not loop on a language the device will never accept.
         if (nextLang() === null) {
           wantRun = false;
-          el.start.disabled = false;
+          retireCurrent();
           el.stop.disabled = true;
           setRec('bad', 'no usable language');
           warn('iOS rejected ' + wantedLang + ' and every fallback (' +
@@ -616,6 +616,8 @@
       }
       if (code === 'not-allowed' || code === 'service-not-allowed') {
         wantRun = false;
+        retireCurrent();
+        el.stop.disabled = true;
         setRec('bad', 'mic blocked');
         warn('Microphone access is blocked for this site. Allow the microphone in ' +
              'Settings, then tap Start again.');
@@ -666,13 +668,20 @@
   // Without that, abort() fires onend, which called scheduleRestart, which
   // aborted again: every cycle created two recognizers until start() began
   // throwing and recognition stopped permanently after any idle period.
-  function rearm(reason) {
-    clearTimeout(restartTimer);
-    note('rearm', reason || 'unspecified' + ' gesture=' + inGesture());
+  // Detach the current recognizer and stop it for good. The retire flag is what
+// stops the instance's own onend from scheduling yet another restart; it must be
+// set before abort(), never after.
+function retireCurrent() {
     var old = rec;
     rec = null;
     if (old) old.retired = true;
     try { if (old) old.abort(); } catch (e) { note('abortThrew', e.message); }
+  }
+
+  function rearm(reason) {
+    clearTimeout(restartTimer);
+    note('rearm', reason || 'unspecified' + ' gesture=' + inGesture());
+    retireCurrent();
 
     rec = newRecognizer();
     stats.sessions++;
@@ -687,15 +696,34 @@
     }
   }
 
+  // Start is deliberately never disabled once the browser supports
+  // SpeechRecognition. Pressing it while already listening re-arms the
+  // recognizer instead of asking for Stop first, which is the whole point:
+  // iOS wants a real gesture for every start(), so a re-pressable Start is
+  // also the "tap to resume" affordance. Nothing else on the page can supply
+  // that gesture.
   function start() {
     if (!SR) return;
     warn('');
     note('ui', 'start tapped, gesture=' + inGesture());
     wantRun = true;
     sessionStartedAt = Date.now();
-    beginLangChain();
-    el.start.disabled = true;
     el.stop.disabled = false;
+
+    // Any recognizer still around is retired first, and it does not matter which
+    // kind it is: either the live one from the run being resumed, or a leftover
+    // from a run that gave up. The language chain running out sets wantRun false
+    // but leaves rec set, because Safari has already ended that instance itself.
+    // Overwriting rec instead is how two recognizers end up alive at once, and
+    // they pile up until start() throws and dictation stops for good.
+    //
+    // beginLangChain() runs every time on purpose. Tapping Start means "start
+    // again with the language I picked", which is also what recovers from an
+    // exhausted chain, and re-resolving it keeps that behaviour predictable
+    // instead of depending on how the previous run happened to end.
+    retireCurrent();
+    beginLangChain();
+
     rec = newRecognizer();
     stats.sessions++;
     setRec('warn', 'starting (' + activeLang + ')');
