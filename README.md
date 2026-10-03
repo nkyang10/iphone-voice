@@ -44,34 +44,34 @@ Allow the microphone if you're asked. From here on, the phone needs nothing from
 
 **4. Talk**
 
-Press **Ctrl+Alt+D** on the PC so the panel says **LISTENING**, and start speaking. Your
-words are typed into whatever you're working in. Press Ctrl+Alt+D again to pause.
+Start speaking. Your words are typed into whatever you're working in.
 
 That's it. You can put the phone down and forget about it.
 
 ## The one thing to understand
 
-The panel starts **PAUSED**, and it will not type anything until you press the key.
+**While the page is listening, everything you say is typed straight into the focused
+window.** There is no pause, no queue and no key to press.
 
-That's on purpose. If it typed the moment it started, a restart could dump words into
-whatever window happened to be open. Instead, while it's paused, your speech is quietly
-**queued** and typed the instant you press play. The queue is visible in the panel, so
-nothing is ever lost.
+That is the whole design now: **the Start button on the phone is the only on/off switch**,
+on either end. Tap it and the desktop types; tap it again and it stops.
+
+It used to be safer. There was a **Ctrl+Alt+D** key on the PC, and the panel started paused,
+so a restart could not dump words into whatever window happened to be open. That second
+switch is gone, so one honest warning: **if you leave the page listening with the phone face
+up, it will pick up room noise and type it.** Put the phone somewhere it cannot hear the
+room, or tap Stop when you are not using it.
 
 ## Everyday use
 
 | | |
 | --- | --- |
-| Start / stop typing | **Ctrl+Alt+D**, or click the panel button |
+| Start / stop typing | **Start listening** on the phone page |
 | Open the page on the phone | Scan the QR code in the panel |
 | See the panel again | Click the tray icon |
 | Move the panel | Drag it. It remembers where you left it |
-| Change the shortcut | Expand the panel, press **Change hotkey**, press a new combination |
 | See what you said last | Shown in the panel as soon as it arrives |
 | If the port is taken | Run `DictationBridge.exe --port 8099` |
-
-You can also click the pause button instead of using the keyboard, if you'd rather not
-reach for a key.
 
 ### Speaking Cantonese or Chinese
 
@@ -92,11 +92,14 @@ setting worth changing.
 
 ## What it looks like in use
 
-The panel collapsed to a single strip, paused, with two utterances waiting:
+The panel, collapsed to a single strip. The dot breathes while the phone is in touch:
 
 <p align="center">
-  <img src="docs/panel-collapsed.png" width="320" alt="Collapsed panel with queued speech">
+  <img src="docs/panel-collapsed.png" width="320" alt="Collapsed panel">
 </p>
+
+Expand it with the **+** for the QR code, the address to type if the camera will not read
+it, and your last utterance.
 
 ## Files it creates
 
@@ -201,11 +204,12 @@ The certificate isn't trusted. Go back to step 4 above, and check you're opening
 and not `http://`.
 
 **It works, then goes quiet after you stop talking for a while.**
-Press Ctrl+Alt+D once. If that wakes it up, your iOS wants a tap for every restart rather
-than restarting on its own. Tell me and I'll add a "tap to resume" button.
+Tap **Start listening** again on the phone. If that wakes it up, your iOS wants a tap for
+every restart rather than restarting on its own.
 
 **The page shows your words but nothing gets typed.**
-Check the panel says **LISTENING**, and that you haven't pressed the hotkey twice.
+Tap **Start listening** on the phone if you stopped it, and check the panel says
+**listening on the phone**.
 
 **Nothing appears in the target program.**
 Check it isn't running as administrator. Open `data\dictation-bridge.log` — it will say

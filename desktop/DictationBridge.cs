@@ -27,7 +27,6 @@ namespace DictationBridge
         public const uint INPUT_KEYBOARD = 1;
         public const uint KEYEVENTF_UNICODE = 0x0004;
         public const uint KEYEVENTF_KEYUP = 0x0002;
-        public const int WM_HOTKEY = 0x0312;
         public const uint MOD_CONTROL = 0x0002;
         public const uint MOD_ALT = 0x0001;
         public const uint MOD_SHIFT = 0x0004;
@@ -84,12 +83,6 @@ namespace DictationBridge
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
@@ -942,9 +935,6 @@ namespace DictationBridge
     {
         private readonly string _token;
         private readonly object _gate = new object();
-        private readonly List<string> _buffer = new List<string>();
-        private bool _armed;
-        private bool _flushOnArm = true;
         private int _typedCount;
         private string _lastTyped = "";
         private DateTime _lastSeen = DateTime.MinValue;
@@ -953,18 +943,6 @@ namespace DictationBridge
         public Bridge(string token)
         {
             _token = token;
-        }
-
-        public bool Armed { get { lock (_gate) { return _armed; } } }
-        public int Buffered { get { lock (_gate) { return _buffer.Count; } } }
-        public bool GetFlushOnArm()
-        {
-            lock (_gate) { return _flushOnArm; }
-        }
-
-        public void SetFlushOnArm(bool value)
-        {
-            lock (_gate) { _flushOnArm = value; }
         }
 
         // With plain HTTP there is no persistent connection, so "connected" means
@@ -1020,82 +998,27 @@ namespace DictationBridge
             RaiseChanged();
         }
 
+        // There is no armed state and no buffer. The phone's Start button is the only
+        // on/off switch: while the page is listening it sends, and whatever it
+        // sends is typed straight into the focused window. That used to be gated
+        // by a desktop toggle as well, which was a second gate for one decision --
+        // and it is the reason a phone left face-up on a desk could pick up room
+        // noise without spraying it at whatever window you were working in.
         public void OnText(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            bool armed;
             lock (_gate)
             {
                 _received++;
-                armed = _armed;
             }
 
-            if (armed)
-            {
-                Injector.TypeText(text, true);
-                lock (_gate)
-                {
-                    _typedCount++;
-                    _lastTyped = text;
-                }
-            }
-            else
-            {
-                bool drop;
-                lock (_gate) { drop = !_flushOnArm; }
-                if (drop)
-                {
-                    Log.Write("dropped (unarmed): " + text);
-                }
-                else
-                {
-                    lock (_gate) { _buffer.Add(text); }
-                    Log.Write("buffered (" + _buffer.Count + "): " + Describe(text));
-                }
-            }
-            RaiseChanged();
-        }
-
-        public void SetArmed(bool armed)
-        {
-            List<string> pending = null;
+            Injector.TypeText(text, true);
             lock (_gate)
             {
-                _armed = armed;
-                if (armed && _flushOnArm && _buffer.Count > 0)
-                {
-                    pending = new List<string>(_buffer);
-                    _buffer.Clear();
-                }
-            }
-
-            Log.Write(armed ? "ARMED - typing into focus" : "disarmed");
-            RaiseChanged();
-
-            if (pending == null) return;
-            Log.Write("flushing " + pending.Count + " buffered utterance(s)");
-            foreach (string t in pending)
-            {
-                Injector.TypeText(t, true);
-                lock (_gate)
-                {
-                    _typedCount++;
-                    _lastTyped = t;
-                }
+                _typedCount++;
+                _lastTyped = text;
             }
             RaiseChanged();
-        }
-
-        public void ClearBuffer()
-        {
-            lock (_gate) { _buffer.Clear(); }
-            Log.Write("buffer cleared");
-            RaiseChanged();
-        }
-
-        public List<string> SnapshotBuffer()
-        {
-            lock (_gate) { return new List<string>(_buffer); }
         }
 
         public int TypedCount
@@ -1108,21 +1031,8 @@ namespace DictationBridge
             get { lock (_gate) { return _lastTyped; } }
         }
 
-        public int WordCount
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    int n = 0;
-                    foreach (string t in _buffer) n += t.Split(' ').Length;
-                    return n;
-                }
-            }
-        }
-
         // Escapes non-ASCII so the log is readable in any console codepage, while
-        // keeping the exact text in the buffer and in what gets typed.
+        // keeping the exact text in what gets typed.
         public static string Describe(string text)
         {
             var sb = new StringBuilder();
@@ -1136,24 +1046,18 @@ namespace DictationBridge
 
         public string StatusJson()
         {
-            bool armed;
-            int buffered;
             int typed;
             string last;
             bool present;
             int received;
             lock (_gate)
             {
-                armed = _armed;
-                buffered = _buffer.Count;
                 typed = _typedCount;
                 last = _lastTyped;
                 received = (int)_received;
                 present = (DateTime.UtcNow - _lastSeen).TotalSeconds < 10;
             }
-            return "{\"armed\":" + (armed ? "true" : "false") +
-                   ",\"buffered\":" + buffered +
-                   ",\"typed\":" + typed +
+            return "{\"typed\":" + typed +
                    ",\"received\":" + received +
                    ",\"phone\":" + (present ? "true" : "false") +
                    ",\"last\":" + Json(last) + "}";
@@ -1768,277 +1672,6 @@ namespace DictationBridge
         }
     }
 
-
-
-
-    internal sealed class HotkeyWindow : NativeWindow
-    {
-        public event Action Pressed;
-
-        // Ctrl+Alt+D by default, but the user can rebind it. The choice is
-        // remembered so it survives a restart.
-        private const int HotkeyId = 0x0BD1;
-        private const string PrefFile = "dictation-bridge-hotkey.txt";
-
-        private uint _mods = Native.MOD_CONTROL | Native.MOD_ALT;
-        private uint _key = (uint)Keys.D;
-        private bool _registered;
-
-        public HotkeyWindow()
-        {
-            CreateHandle(new CreateParams { Parent = Native.HWND_MESSAGE });
-            Load();
-        }
-
-        public string Combination
-        {
-            get
-            {
-                string s = "";
-                if ((_mods & Native.MOD_CONTROL) != 0) s += "Ctrl+";
-                if ((_mods & Native.MOD_ALT) != 0) s += "Alt+";
-                if ((_mods & Native.MOD_SHIFT) != 0) s += "Shift+";
-                if ((_mods & Native.MOD_WIN) != 0) s += "Win+";
-                return s + KeyName(_key);
-            }
-        }
-
-        // Keys.ToString() turns non-printable keys into names like "Oem7" or
-        // "D1", which is useless in a shortcut label.
-        public static string KeyName(uint key)
-        {
-            switch (key)
-            {
-                case (uint)Keys.Space: return "Space";
-                case (uint)Keys.Escape: return "Esc";
-                case (uint)Keys.Enter: return "Enter";
-                case (uint)Keys.Tab: return "Tab";
-                case (uint)Keys.Back: return "Backspace";
-                case (uint)Keys.Delete: return "Del";
-                case (uint)Keys.Insert: return "Ins";
-                case (uint)Keys.Home: return "Home";
-                case (uint)Keys.End: return "End";
-                case (uint)Keys.PageUp: return "PgUp";
-                case (uint)Keys.PageDown: return "PgDn";
-                case (uint)Keys.Left: return "Left";
-                case (uint)Keys.Right: return "Right";
-                case (uint)Keys.Up: return "Up";
-                case (uint)Keys.Down: return "Down";
-            }
-            if (key >= (uint)Keys.F1 && key <= (uint)Keys.F24)
-            {
-                return "F" + (key - (uint)Keys.F1 + 1).ToString();
-            }
-            if (key >= 0x30 && key <= 0x39) return ((char)key).ToString();
-            if (key >= 0x41 && key <= 0x5A) return ((char)key).ToString();
-            if (key >= 0x60 && key <= 0x69) return "Num" + (char)key;
-            return "key" + key.ToString("X2");
-        }
-
-        protected override void WndProc(ref Message m)
-        {
-            if (m.Msg == Native.WM_HOTKEY)
-            {
-                if (Pressed != null) Pressed();
-            }
-            base.WndProc(ref m);
-        }
-
-        private void Load()
-        {
-            try
-            {
-            string path = Store.File(PrefFile);
-            if (!System.IO.File.Exists(path)) return;
-                string[] parts = System.IO.File.ReadAllText(path).Split('+');
-                uint k = 0;
-                if (parts.Length < 2) return;
-                Keys key = (Keys)Enum.Parse(typeof(Keys), parts[parts.Length - 1], true);
-                k = (uint)key;
-                _key = k;
-                _mods = 0;
-                for (int i = 0; i < parts.Length - 1; i++)
-                {
-                    string m = parts[i].Trim().ToLowerInvariant();
-                    if (m == "ctrl") _mods |= Native.MOD_CONTROL;
-                    else if (m == "alt") _mods |= Native.MOD_ALT;
-                    else if (m == "shift") _mods |= Native.MOD_SHIFT;
-                    else if (m == "win") _mods |= Native.MOD_WIN;
-                }
-                Log.Write("restored hotkey: " + Combination);
-            }
-            catch (Exception e)
-            {
-                Log.Write("could not read saved hotkey: " + e.Message);
-            }
-        }
-
-        private void Save()
-        {
-            try
-            {
-                string path = Store.File(PrefFile);
-                string s = "";
-                if ((_mods & Native.MOD_CONTROL) != 0) s += "Ctrl+";
-                if ((_mods & Native.MOD_ALT) != 0) s += "Alt+";
-                if ((_mods & Native.MOD_SHIFT) != 0) s += "Shift+";
-                if ((_mods & Native.MOD_WIN) != 0) s += "Win+";
-                s += KeyName(_key);
-                System.IO.File.WriteAllText(path, s);
-            }
-            catch (Exception) { }
-        }
-
-        // Rebinds to whatever the user pressed. A modifier on its own is not a
-        // hotkey, so keep waiting rather than registering something useless.
-        public bool TryBind(uint mods, uint key)
-        {
-            if (mods == 0) return false;
-
-            Unregister();
-            if (!Native.RegisterHotKey(Handle, HotkeyId,
-                    mods | Native.MOD_NOREPEAT, key))
-            {
-                Log.Write("WARN: " + Describe(mods, key) + " is already taken by another app.");
-                // Put the previous binding back so the app stays usable.
-                Native.RegisterHotKey(Handle, HotkeyId, _mods | Native.MOD_NOREPEAT, _key);
-                _registered = true;
-                return false;
-            }
-
-            _mods = mods;
-            _key = key;
-            _registered = true;
-            Save();
-            Log.Write("hotkey registered: " + Combination);
-            return true;
-        }
-
-        private static string Describe(uint mods, uint key)
-        {
-            string s = "";
-            if ((mods & Native.MOD_CONTROL) != 0) s += "Ctrl+";
-            if ((mods & Native.MOD_ALT) != 0) s += "Alt+";
-            if ((mods & Native.MOD_SHIFT) != 0) s += "Shift+";
-            if ((mods & Native.MOD_WIN) != 0) s += "Win+";
-            return s + KeyName(key);
-        }
-
-        public void Unregister()
-        {
-            if (!_registered) return;
-            Native.UnregisterHotKey(Handle, HotkeyId);
-            _registered = false;
-        }
-
-        public void Register()
-        {
-            if (Native.RegisterHotKey(Handle, HotkeyId,
-                    _mods | Native.MOD_NOREPEAT, _key))
-            {
-                _registered = true;
-                Log.Write("hotkey registered: " + Combination);
-            }
-            else
-            {
-                Log.Write("WARN: " + Combination +
-                          " is already taken. Rebind it in the panel.");
-            }
-        }
-    }
-
-    // Captures the next key combination the user presses, then rebinds.
-    internal sealed class HotkeyCaptureForm : Form
-    {
-        private readonly HotkeyWindow _hotkeys;
-        public bool Bound { get; private set; }
-
-        public HotkeyCaptureForm(HotkeyWindow hotkeys)
-        {
-            _hotkeys = hotkeys;
-            Text = "Set hotkey";
-            ClientSize = new Size(340, 150);
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            StartPosition = FormStartPosition.CenterParent;
-            MaximizeBox = false;
-            MinimizeBox = false;
-            BackColor = Color.FromArgb(24, 26, 30);
-            ForeColor = Color.FromArgb(232, 234, 237);
-            Font = new Font("Segoe UI", 9F);
-            TopMost = true;
-            KeyPreview = true;
-
-            var hint = new Label
-            {
-                Dock = DockStyle.Top,
-                Height = 40,
-                Text = "Press the combination you want to use.",
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-            var status = new Label
-            {
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font("Segoe UI", 12F, FontStyle.Bold)
-            };
-            status.Text = "waiting...";
-
-            var cancel = new Button
-            {
-                Dock = DockStyle.Bottom,
-                Height = 32,
-                Text = "Cancel",
-                FlatStyle = FlatStyle.Flat,
-                UseVisualStyleBackColor = false
-            };
-            cancel.Click += (s, e) => { Bound = false; Close(); };
-
-            Controls.Add(status);
-            Controls.Add(hint);
-            Controls.Add(cancel);
-            _status = status;
-        }
-
-        private readonly Label _status;
-
-        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
-        {
-            Keys key = keyData & Keys.KeyCode;
-            Keys mods = keyData & Keys.Modifiers;
-
-            if (key == Keys.Escape)
-            {
-                Bound = false;
-                Close();
-                return true;
-            }
-
-            // F12 is reserved by the debugger, per RegisterHotKey docs.
-            if (key == Keys.F12) return true;
-
-            uint modBits = 0;
-            if ((mods & Keys.Control) != 0) modBits |= Native.MOD_CONTROL;
-            if ((mods & Keys.Alt) != 0) modBits |= Native.MOD_ALT;
-            if ((mods & Keys.Shift) != 0) modBits |= Native.MOD_SHIFT;
-            if ((mods & Keys.LWin) != 0 || (mods & Keys.RWin) != 0) modBits |= Native.MOD_WIN;
-
-            // A bare modifier is not bindable; wait for a real key.
-            if (modBits == 0) return true;
-
-            _status.Text = key == Keys.D ? "D" : key.ToString();
-            if (_hotkeys.TryBind(modBits, (uint)key))
-            {
-                Bound = true;
-                Close();
-            }
-            else
-            {
-                _status.Text = "taken - try another";
-            }
-            return true;
-        }
-    }
-
     // Paints the QR code for the panel's own page address.
     //
     // The encoding is QRCoder's, vendored under vendor\QRCoder and compiled in
@@ -2379,47 +2012,38 @@ namespace DictationBridge
     {
         private readonly Bridge _bridge;
         private readonly string _url;
-        private readonly HotkeyWindow _hotkeys;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly System.Windows.Forms.Timer _pulse;
 
         // Not readonly: these are built by BuildUi, which is called from the
         // constructor but is not itself one.
         private Panel _strip;
-        private Label _status;
         private Panel _detail;
         private Panel _body;
-        private Button _toggle;
         private Button _collapse;
-        private Button _setHotkey;
-        private PaintText _hotkeyLabel;
-        private CheckBox _flushBox;
         private TextBox _lastText;
-        private ListBox _bufferList;
         private LinkLabel _urlLink;
 
         private Point _dragOrigin;
         private bool _dragging;
         private bool _expanded;
-        private bool _suppressFlushEvent;
         private int _pulsePhase;
         private PaintDot _lamp;
         private PaintText _phoneState;
         private PaintCard _lastCard;
-        private Label _listHeader;
-        private Label _emptyNote;
         private QrView _qr;
 
         // One place that owns the sizes, so expand and collapse cannot disagree.
+        // The expanded panel lost the queue list, the hold-until-armed checkbox and
+        // the hotkey row, so it is shorter than it was.
         private static readonly Size CollapsedSize = new Size(320, 56);
-        private static readonly Size ExpandedSize = new Size(320, 446);
+        private static readonly Size ExpandedSize = new Size(320, 318);
         private const string PositionFile = "dictation-bridge-position.txt";
 
-        public MainForm(Bridge bridge, string url, HotkeyWindow hotkeys)
+        public MainForm(Bridge bridge, string url)
         {
             _bridge = bridge;
             _url = url;
-            _hotkeys = hotkeys;
 
             Text = "Dictation Bridge";
             FormBorderStyle = FormBorderStyle.None;
@@ -2457,8 +2081,8 @@ namespace DictationBridge
             _timer.Tick += (s, e) => Refresh2();
             _timer.Start();
 
-            // A slow breath on the armed dot, so it is obvious at a glance that
-            // the app is listening without needing to read anything.
+            // A slow breath on the lamp while the phone is in touch, so it is obvious at a
+            // glance that the app is listening without needing to read anything.
             _pulse = new System.Windows.Forms.Timer { Interval = 900 };
             _pulse.Tick += (s, e) =>
             {
@@ -2553,17 +2177,6 @@ private void BuildUi(Control host)
                 BackColor = Skin.Surface
             };
 
-            _toggle = new SoftButton
-            {
-                Dock = DockStyle.Left,
-                Width = 118,
-                Height = 30,
-                Text = "DISARMED",
-                Font = Skin.Badge,
-                Corner = 8
-            };
-            _toggle.Click += (s, e) => _bridge.SetArmed(!_bridge.Armed);
-
             _collapse = new SoftButton
             {
                 Dock = DockStyle.Right,
@@ -2588,10 +2201,13 @@ private void BuildUi(Control host)
                 Size = new Size(12, 12)
             };
 
+            // "Start on the phone" replaces what used to be an armed/disarmed
+            // button: the only on/off switch is on the phone now, so the strip says
+            // where it is rather than offering a second one.
             _phoneState = new PaintText
             {
                 Location = new Point(30, 9),
-                Size = new Size(104, 24),
+                Size = new Size(200, 24),
                 TextFont = Skin.UiSmall,
                 InkColor = Skin.InkSoft,
                 Align = ContentAlignment.MiddleLeft
@@ -2602,7 +2218,6 @@ private void BuildUi(Control host)
 
             _strip.Controls.Add(stripPad);
             _strip.Controls.Add(_collapse);
-            _strip.Controls.Add(_toggle);
             stripPad.BringToFront();
 
             // ---- everything below the strip --------------------------------
@@ -2710,114 +2325,35 @@ private void BuildUi(Control host)
             lastRow.Controls.Add(_lastCard);
             _lastCard.SendToBack();
 
-            _listHeader = new Label
-            {
-                Dock = DockStyle.Top,
-                Height = 20,
-                Text = "WAITING TO TYPE",
-                Font = Skin.UiTiny,
-                ForeColor = Skin.InkFaint,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-
-            _bufferList = new ListBox
-            {
-                Dock = DockStyle.Fill,
-                BorderStyle = BorderStyle.None,
-                BackColor = Skin.Page,
-                ForeColor = Skin.Ink,
-                IntegralHeight = false,
-                Font = Skin.UiSmall
-            };
-
-            var listWrap = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Skin.Page,
-                Padding = new Padding(1)
-            };
-            listWrap.Controls.Add(_bufferList);
-
-            // An empty queue is a normal state, not a broken table. Say so
-            // instead of leaving a blank rectangle sitting there.
-            _emptyNote = new Label
-            {
-                Dock = DockStyle.Fill,
-                Text = "Nothing waiting.\r\n\r\nSpeak while paused and it is\r\ntyped when you press play.",
-                Font = Skin.UiSmall,
-                ForeColor = Skin.InkFaint,
-                TextAlign = ContentAlignment.MiddleCenter,
-                BackColor = Skin.Page
-            };
-            listWrap.Controls.Add(_emptyNote);
-
             // ---- footer ----------------------------------------------------
+            // Just the two buttons that still do something. The queue list, the
+            // hold-until-armed checkbox and the hotkey row all went with the
+            // arming model, and a row of disabled-looking furniture would be worse
+            // than less.
             var bottom = new TableLayoutPanel
             {
                 Dock = DockStyle.Bottom,
-                Height = 112,
+                Height = 44,
                 BackColor = Skin.Surface,
                 ColumnCount = 2,
-                RowCount = 4
+                RowCount = 1
             };
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
-            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 20F));
-            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
-            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
+            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
 
-            _flushBox = new CheckBox
-            {
-                Text = "Hold speech until armed",
-                Checked = true,
-                AutoSize = true,
-                Dock = DockStyle.Fill,
-                Font = Skin.UiSmall,
-                ForeColor = Skin.InkSoft,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Skin.Surface
-            };
-            _flushBox.FlatAppearance.BorderSize = 0;
-            _flushBox.CheckedChanged += (s, e) =>
-            {
-                if (_suppressFlushEvent) return;
-                _bridge.SetFlushOnArm(_flushBox.Checked);
-                Log.Write(_flushBox.Checked
-                    ? "mode: buffer and flush on arm"
-                    : "mode: drop while disarmed");
-            };
-
-            _hotkeyLabel = new PaintText
-            {
-                Dock = DockStyle.Fill,
-                TextFont = Skin.UiTiny,
-                InkColor = Skin.InkFaint,
-                Align = ContentAlignment.MiddleLeft
-            };
-
-            _setHotkey = SoftButtonOf("Change hotkey", (s, e) => Rebind());
-            var clearButton = SoftButtonOf("Clear queue", (s, e) => _bridge.ClearBuffer());
             var copyButton = SoftButtonOf("Copy address", (s, e) => Copy(_url));
             // Close() alone is swallowed by hide-to-tray, so quit is routed back
             // to the tray context which knows how to really exit.
             var quitButton = SoftButtonOf("Quit", (s, e) => Quit());
             quitButton.Ink = Skin.Danger;
 
-            bottom.Controls.Add(_flushBox, 0, 0);
-            bottom.SetColumnSpan(_flushBox, 2);
-            bottom.Controls.Add(_hotkeyLabel, 0, 1);
-            bottom.SetColumnSpan(_hotkeyLabel, 2);
-            bottom.Controls.Add(_setHotkey, 0, 2);
-            bottom.Controls.Add(clearButton, 1, 2);
-            bottom.Controls.Add(copyButton, 0, 3);
-            bottom.Controls.Add(quitButton, 1, 3);
+            bottom.Controls.Add(copyButton, 0, 0);
+            bottom.Controls.Add(quitButton, 1, 0);
 
             // Everything below the strip must live inside _detail. Adding the
             // bottom bar to _body instead left its buttons drawn on top of the
             // collapsed strip, where they swallowed clicks aimed for "+".
-            _detail.Controls.Add(listWrap);
-            _detail.Controls.Add(_listHeader);
             _detail.Controls.Add(bottom);
             _detail.Controls.Add(lastRow);
             _detail.Controls.Add(urlCard);
@@ -2842,23 +2378,10 @@ private void BuildUi(Control host)
                 Text = text,
                 Dock = DockStyle.Fill,
                 Font = Skin.UiSmall,
-                Margin = new Padding(0, 3, 5, 3)
+                Margin = new Padding(0, 6, 5, 6)
             };
             b.Click += onClick;
             return b;
-        }
-
-        private void Rebind()
-        {
-            using (var capture = new HotkeyCaptureForm(_hotkeys))
-            {
-                capture.ShowDialog(this);
-                if (capture.Bound)
-                {
-                    Log.Write("hotkey changed to " + _hotkeys.Combination);
-                }
-            }
-            Refresh2();
         }
 
         private void MakeDraggable(Control c)
@@ -2981,37 +2504,22 @@ private void BuildUi(Control host)
         private void Refresh2()
         {
             if (IsDisposed) return;
-            bool armed = _bridge.Armed;
+            // The lamp and the label now track whether the phone is in touch,
+            // not whether an armed flag is set. There is no armed flag.
             bool present = _bridge.PhonePresent;
-            int buffered = _bridge.Buffered;
-
-            var toggle = _toggle as SoftButton;
-            if (toggle != null)
-            {
-                toggle.Primary = armed;
-                toggle.Text = armed ? "LISTENING" : "PAUSED";
-                toggle.Invalidate();
-            }
 
             if (_lamp != null)
             {
-                _lamp.DotColor = armed ? Skin.Accent : Skin.InkFaint;
-                _lamp.Breathe = armed;
+                _lamp.DotColor = present ? Skin.Accent : Skin.InkFaint;
+                _lamp.Breathe = present;
                 _lamp.Phase = _pulsePhase;
                 _lamp.Invalidate();
             }
 
             if (_phoneState != null)
             {
-                if (armed && !present) _phoneState.Set("waiting for phone", Skin.Warn);
-                else if (present) _phoneState.Set("phone ready", Skin.Good);
-                else _phoneState.Set("no phone", Skin.Warn);
-            }
-
-            if (_hotkeyLabel != null)
-            {
-                _hotkeyLabel.Caption = "HOTKEY   " + _hotkeys.Combination;
-                _hotkeyLabel.Invalidate();
+                if (present) _phoneState.Set("listening on the phone", Skin.Good);
+                else _phoneState.Set("tap Start on the phone", Skin.Warn);
             }
 
             _lastText.Text = _bridge.LastText;
@@ -3023,25 +2531,6 @@ private void BuildUi(Control host)
                 _lastCard.Invalidate();
                 _lastText.BackColor = hasText ? Skin.AccentSoft : Skin.Field;
             }
-
-            if (_bufferList.Items.Count != buffered)
-            {
-                _bufferList.BeginUpdate();
-                _bufferList.Items.Clear();
-                foreach (string t in _bridge.SnapshotBuffer()) _bufferList.Items.Add(t);
-                _bufferList.EndUpdate();
-                if (buffered > 0) _bufferList.TopIndex = _bufferList.Items.Count - 1;
-            }
-            _listHeader.Text = buffered == 0
-                ? "QUEUE"
-                : "QUEUED   " + buffered + (_bridge.WordCount > 0
-                    ? "   " + _bridge.WordCount + " words" : "");
-
-            if (_emptyNote != null)
-            {
-                _emptyNote.Visible = buffered == 0;
-                _bufferList.Visible = buffered > 0;
-            }
         }
     }
 
@@ -3049,28 +2538,11 @@ private void BuildUi(Control host)
     {
         private readonly Bridge _bridge;
         private readonly NotifyIcon _tray;
-        private readonly ToolStripMenuItem _armItem;
-        private readonly ToolStripMenuItem _bufferItem;
-        private readonly HotkeyWindow _hotkeys;
 
         public TrayContext(Bridge bridge, string token, string url)
         {
             _bridge = bridge;
             _appUrl = url;
-
-            _armItem = new ToolStripMenuItem("Armed (Ctrl+Alt+D)");
-            _armItem.Click += (s, e) => _bridge.SetArmed(!_bridge.Armed);
-            _armItem.CheckOnClick = false;
-
-            _bufferItem = new ToolStripMenuItem("Buffer while disarmed");
-            _bufferItem.Click += (s, e) =>
-            {
-                bool next = !_bridge.GetFlushOnArm();
-                _bridge.SetFlushOnArm(next);
-                _bufferItem.Checked = next;
-                Log.Write(next ? "mode: buffer and flush on arm" : "mode: drop while disarmed");
-            };
-            _bufferItem.Checked = true;
 
             var quitItem = new ToolStripMenuItem("Quit");
             quitItem.Click += (s, e) =>
@@ -3103,27 +2575,22 @@ private void BuildUi(Control host)
                 try { Clipboard.SetText(url); Log.Write("copied " + url); } catch (Exception) { }
             };
 
-            var clearItem = new ToolStripMenuItem("Clear buffer");
-            clearItem.Click += (s, e) => _bridge.ClearBuffer();
-
             var appItem = new ToolStripMenuItem("Copy app address");
             appItem.Click += (s, e) => CopyText(_appUrl);
 
             var showItem = new ToolStripMenuItem("Show window");
             showItem.Click += (s, e) => ShowWindow();
 
+            // No arm item and no buffer item: the phone's Start button is the only
+            // on/off switch, and there is nothing to hold text for, because
+            // whatever the page sends is typed.
             var menu = new ContextMenuStrip();
             menu.Items.Add(showItem);
-            menu.Items.Add(_armItem);
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(_bufferItem);
-            menu.Items.Add(clearItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(appItem);
             menu.Items.Add(copyItem);
             menu.Items.Add(logItem);
             menu.Items.Add(quitItem);
-
 
             _tray = new NotifyIcon
             {
@@ -3134,11 +2601,7 @@ private void BuildUi(Control host)
             };
             _tray.DoubleClick += (s, e) => ShowWindow();
 
-            _hotkeys = new HotkeyWindow();
-            _hotkeys.Pressed += () => _bridge.SetArmed(!_bridge.Armed);
-            _hotkeys.Register();
-
-            _form = new MainForm(_bridge, url, _hotkeys);
+            _form = new MainForm(_bridge, url);
             _form.QuitRequested += () =>
             {
                 _reallyQuitting = true;
@@ -3184,15 +2647,10 @@ private void BuildUi(Control host)
 
         private void Update()
         {
-            bool armed = _bridge.Armed;
-            _armItem.Checked = armed;
-            int buffered = _bridge.Buffered;
-            bool present = _bridge.PhonePresent;
-
-            string status = armed ? "ARMED" : "disarmed";
-            if (buffered > 0) status += " (" + buffered + " buffered)";
-            if (!present) status += " - no phone";
-
+            // "typing" rather than "armed": the armed/buffered wording described a
+            // gate that no longer exists. What the tooltip can honestly report is
+            // whether the phone is still in touch.
+            string status = _bridge.PhonePresent ? "typing" : "waiting for the phone";
             string tip = "Dictation Bridge: " + status;
             if (tip.Length > 63) tip = tip.Substring(0, 63);
             _tray.Text = tip;
@@ -3329,8 +2787,8 @@ private void BuildUi(Control host)
             {
                 Log.Say("  Open:  " + url);
             }
-            Log.Say("  Tap Start once. After that, only the Windows hotkey matters.");
-            Log.Say("  Ctrl+Alt+D toggles typing.");
+            Log.Say("  Leave Start on and it keeps listening. Whatever you say is typed");
+            Log.Say("  straight into whatever window you are working in.");
             Log.Say("");
 
             Log.Stage("building the panel");

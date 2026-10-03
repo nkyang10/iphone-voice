@@ -10,7 +10,8 @@ matters to someone editing the code belongs here instead.
 
 An iOS Safari page captures dictation with the Web Speech API and POSTs each finished
 utterance to a Windows desktop app, which types it into the focused window with
-`SendInput`/`KEYEVENTF_UNICODE`. A global hotkey gates whether typing happens.
+`SendInput`/`KEYEVENTF_UNICODE`. The page's Start button is the only on/off switch: while
+it is listening, every utterance is typed, with no desktop gate.
 
 Two halves, one repo:
 
@@ -96,12 +97,12 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
 - `MainForm`'s fields are deliberately **not** `readonly`: they are assigned in
   `BuildUi`, which the constructor calls, but C# requires the assignment to be
   inside a constructor body.
-- Rebinding the hotkey must unregister before registering. `RegisterHotKey` keeps
-  an existing registration alive if called twice with the same id, so
-  `HotkeyWindow.TryBind` unregisters first and restores the previous binding if the
-  new one is refused. F12 is refused; the debugger reserves it.
-- `Keys.ToString()` produces names like `Oem7` or `D1` that are meaningless in a
-  shortcut label. Use `HotkeyWindow.KeyName`.
+- There is no armed flag, no buffer and no hotkey. `Bridge.OnText` types
+  unconditionally, and `/status` carries `typed`, `received`, `phone` and `last` only.
+  Do not reintroduce a desktop gate: the phone's Start button is the switch, and a
+  second one on the PC was a duplicate decision, not a safety net. It did mask
+  room noise on a phone left face up, which is now a documented trade-off in the
+  README rather than something the code hides.
 - The page must stay dependency-free. It is served to a phone over a LAN.
 
 ## Things that will bite you

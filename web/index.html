@@ -116,8 +116,7 @@
 
 <div class="card">
   <h2>Desktop</h2>
-  <div class="row"><span class="label">Typing</span><span class="val" id="armState">unknown</span></div>
-  <div class="row"><span class="label">Hotkey</span><span class="val">Ctrl+Alt+D</span></div>
+  <div class="row"><span class="label">Typing</span><span class="val" id="typingState">checking</span></div>
 </div>
 
 <div class="card">
@@ -172,7 +171,7 @@
     diagOut: document.getElementById('diagOut'),
     pending: document.getElementById('pending'),
     pendingText: document.getElementById('pendingText'),
-    armState: document.getElementById('armState'),
+    typingState: document.getElementById('typingState'),
     stats: document.getElementById('stats')
   };
 
@@ -277,14 +276,14 @@
       });
   }
 
-  // Polls for the arm state and flushes anything queued while offline.
+  // Polls the desktop and flushes anything queued while offline.
   function pollStatus() {
     return post('/status').then(function (s) {
       el.wsDot.className = 'dot ok';
       el.wsLabel.textContent = 'connected to desktop';
-      el.armState.textContent = s.armed
-        ? 'ON - typing into focus'
-        : 'off - buffering';
+      // There is no armed flag to read any more: the desktop types whatever
+      // arrives, and this page's Start button is the only on/off switch.
+      el.typingState.textContent = 'straight into the focused window';
       serverTyped = s.typed;
       if (pending.length > 0 && !pendingPost) {
         var queued = pending.slice();
@@ -298,7 +297,7 @@
     }).catch(function () {
       el.wsDot.className = 'dot bad';
       el.wsLabel.textContent = 'desktop not reachable';
-      el.armState.textContent = 'unknown';
+      el.typingState.textContent = 'unknown';
     });
   }
 

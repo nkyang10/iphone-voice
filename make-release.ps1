@@ -188,18 +188,20 @@ Safari instead.
 
 ## Use
 
-Press Ctrl+Alt+D on the PC. The panel says LISTENING. Now talk. Press it again to
-pause. While paused your speech is queued, and typed the moment you press play, so
-nothing is lost.
+Start listening on the phone, then talk. Whatever you say is typed straight into the
+window you are working in. Tap Start again to stop.
 
 | | |
 | --- | --- |
-| Start / stop typing | Ctrl+Alt+D, or click the panel button |
+| Start / stop typing | Start listening, on the phone page |
 | Open the page on the phone | Scan the QR code in the panel |
 | Get the panel back | Click the tray icon, bottom right |
 | Move it | Drag it. It remembers where you left it |
-| Use a different key | Expand the panel, press Change hotkey |
 | Port already in use | Run `DictationBridge.exe --port 8099` |
+
+There is no pause on the PC and no queue. One thing worth knowing: if you leave the page
+listening with the phone face up, it will pick up room noise and type it, so leave the
+phone somewhere it cannot hear the room, or tap Stop when you are not using it.
 
 Before first real use, set Settings > Display & Brightness > Auto-Lock to Never on
 the phone. A locked screen stops dictation.
@@ -218,7 +220,8 @@ addresses the PC had when it was made. The app notices and issues a new one, and
 so in `data\dictation-bridge.log`. Send the new `data\dictation-bridge.cer` to the phone
 and install it again.
 
-Nothing types: the panel must say LISTENING.
+Nothing types: check the phone page still says it is listening, and that the panel says
+"listening on the phone".
 
 Nothing appears in the target program: it may be running as administrator, which
 Windows blocks. `data\dictation-bridge.log` will say `SendInput sent 0/44`.
