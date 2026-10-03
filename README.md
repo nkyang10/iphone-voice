@@ -29,7 +29,7 @@ own copy on that first run, so everyone gets one that matches their own machine.
 **2. On the phone**
 
 Point the camera at the QR code on the panel and tap the link that appears. That opens
-the address, which looks like `https://192.168.1.162:8080/`.
+the address, which looks like `https://192.168.1.162:17123/`.
 
 If your camera won't read the code, the same address is written beside it — type it into
 Safari instead.
@@ -107,6 +107,17 @@ certificate.
 Only one file matters to you: **`data\dictation-bridge.cer`**, the certificate to install
 on the phone. The app prints its full path when it starts.
 
+Two more are there for when something goes wrong:
+
+| File | What it's for |
+| --- | --- |
+| `dictation-bridge.log` | Everything the app did, in order. **Send this with any bug report.** |
+| `last-run.txt` | Says whether the last run finished cleanly. Still reading `running` means it was killed or crashed. |
+| `crash.txt` | Only exists if something threw. The full error and stack trace. |
+
+Right-click the tray icon and choose **Show the log file** to open the log in Explorer with
+it already selected, ready to attach.
+
 ## Privacy
 
 Your speech is transcribed by **Apple**, because that's how Safari's dictation works. The
@@ -161,11 +172,29 @@ The desktop holds onto its certificate between runs, so rebooting your PC or res
 the app never asks you to do this again.
 
 The certificate also covers the name `dictation-bridge.local`. If your phone can resolve
-it, you can use `https://dictation-bridge.local:8080/` instead of the IP address and the
+it, you can use `https://dictation-bridge.local:17123/` instead of the IP address and the
 same certificate will keep working on **any** network. It doesn't resolve everywhere, so
 treat the IP as the reliable option and the name as a bonus.
 
 ## When something goes wrong
+
+**The app just disappeared.**
+This one has its own answer, and it is a real fix rather than a guess: the app writes down
+everything it does, including any error it could catch. Open `data\dictation-bridge.log` and
+send it. The log is timestamped and each run is fenced with `=== run N starting ===`, so you
+can see exactly how far it got. If `data\last-run.txt` still says `state: running` it was
+killed or died somewhere nothing could catch, and the log will say so on the next launch. If
+`data\crash.txt` exists, send that too; it's short and holds the full stack trace.
+
+**A red box appeared when it started.**
+That is the app telling you it cannot go on, rather than vanishing. The message repeats what
+the log says. If it is about a port, start it again with `--port` and a different number.
+
+**The address has a different port than usual.**
+That is normal. The app asks for port 17123, and if Windows has reserved it — Hyper-V, WSL2
+and Docker Desktop all reserve large blocks — it quietly moves to another port rather than
+refusing to start. The panel, the QR code and the log all show the real one. Just use what
+the QR code says, or rescan it.
 
 **The page says it has no speech recognition.**
 The certificate isn't trusted. Go back to step 4 above, and check you're opening `https://`

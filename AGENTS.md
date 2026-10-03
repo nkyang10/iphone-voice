@@ -134,9 +134,9 @@ recognizer goes deaf while TTS plays, and a second audio track gets muted within
 second or two. No read-back confirmations, no level meter.
 
 **The socket port is the page's port.** The server serves the page, `/status`, `/speak`,
-and `/diag` on one port, and `/config` returns `wsPort` — an artifact of the design that
-is no longer a separate listener. Do not reintroduce a second TLS listener: iOS accepted
-TLS on the HTTP port while rejecting the identical certificate on a second port.
+and `/diag` on one port, and the page reaches every endpoint with a relative path, so it
+follows whichever port the app ended up on. Do not reintroduce a second TLS listener: iOS
+accepted TLS on the HTTP port while rejecting the identical certificate on a second port.
 
 **Do not switch back to WebSocket.** It was removed deliberately. Chrome takes the
 `Sec-WebSocket-Accept` value verbatim, so a space after the colon fails the handshake;
@@ -153,7 +153,70 @@ which presented as "nothing heard, no error".
 **Logging escapes non-ASCII.** `Bridge.Describe` writes `\uXXXX`. The log is read in
 consoles with arbitrary code pages, and a raw Cantonese string gets mangled there even
 though the buffer and the injected text are correct. Keep the exact text where it
-matters, escape it only for display.
+matters, escape it only for display. `crash.txt` is the deliberate exception: it is read
+in Notepad and attached to a report, so it keeps raw UTF-8.
+
+**The app can die with nothing to show for it, because it is a `winexe`.** `/target:winexe`
+means there is no console when a user double-clicks the exe, so every `Console.WriteLine`
+reaches nobody. Worse, anything that throws before the first window exists — a port already
+in use, a full disk, a denied folder — used to end the process with a log that simply
+stopped mid-sentence. That is not hypothetical: it is what a real user's "it just closes"
+report turned out to be. Three things prevent a repeat, and all three are load-bearing:
+
+- `Log.InstallCrashHandlers()` is the first statement in `Main`, before any work. It must
+  call `Application.SetUnhandledExceptionMode(CatchException)` first, or WinForms handles a
+  UI-thread exception itself and `Application.ThreadException` never fires.
+- `Main` wraps the real work in try/catch/finally. Anything that can throw before the
+  message loop has to land in that catch, or it is an invisible exit.
+- A fatal error also shows a `MessageBox`. With no console it is the only on-screen
+  evidence that the app started at all.
+
+Do not add work to `Main` outside that try. `Program.Run` is the body; `Main` is the frame.
+
+**`last-run.txt` is how a crash is recognised after the fact.** A process that dies cannot
+clean up, so `BeginRun` writes `state: running` and `EndRun` overwrites it. On the next
+launch, a marker still reading `running` is reported as an unclean exit. `EndRun` is called
+from a `finally` and is idempotent: without the `finally`, a clean exit would leave the
+marker saying `running` and every later launch would report a crash that never happened.
+The run counter is carried across launches through that same file, so it has to be written
+even when nothing else changes.
+
+**`Log.Quiet` only collapses consecutive repeats, and the key must be stable.** The phone
+polls `/status` every second or two; written out in full it buried the startup and crash
+lines that were the reason anyone was reading the file. Two consequences: it compares
+against only the *previous* line, so two messages that alternate will both be written, and
+the request line must not include the client's ephemeral port, or nothing ever matches.
+`Servers.Host` strips it.
+
+**The main log rotates at 2 MB.** It did not used to, for the same reason `/status` was
+quieted. Anything appended per request needs a `Roll` call, not just the diagnostics file.
+
+**Do not trust `Environment.OSVersion` in this exe.** Without a `supportedOS` manifest,
+which is not worth adding because it changes how the app is shelled, Windows reports 6.2 for
+every modern release. `Log.WinVersion` reads the build number from the registry instead.
+The registry's `ProductName` is *also* wrong in the other direction — it says "Windows 10"
+on Windows 11 — so it is reported separately and labelled as the stale field it is.
+
+**The default port is 17123, and the fallback is random.** Both are deliberate, and both came
+from a real report. `8080` was the old default and it is the single most contested port on a
+Windows machine: half the dev servers ever written default to it, and Hyper-V, WSL2 and
+Docker Desktop hand out large reserved blocks that routinely swallow it. `WSAEACCES`
+(10013) on a port above 1024 is *not* a conflict — nothing is listening — it is Windows
+saying the port is reserved, and it used to end the process with nothing in the log.
+
+Three things hold that in place, and all three are load-bearing:
+
+- `Servers.DefaultPort` is the only default. Do not put a port literal back in `Program.Run`.
+- The fallback **samples** 40 random ports out of `RandomLow`–`RandomHigh` rather than
+  walking upward. Sequential probing is the obvious fix and it is wrong: a reserved block can
+  be thousands of ports wide, so 8080, 8081, 8082... walks straight into the next one.
+- The sample range stays **below** the OS dynamic port range (49152+). Those are a bad place
+  to run a server; they are in active use by outgoing connections, so a listener there can be
+  stolen out from under us.
+
+A port given on the command line is never second-guessed: `allowFallback` is false, so it
+fails loudly and says so. Somebody who passed `--port` did it because the default was
+already taken, and silently moving them is worse than telling them.
 
 **The cert is self-signed on purpose.** A CA hierarchy was tried and reverted: `SslStream`
 on Windows refuses to serve a chain it cannot validate to a root in a local trust store,

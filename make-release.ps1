@@ -181,7 +181,7 @@ is one more step:
 
 **4. Open the page.** The panel shows a QR code. Point the phone's camera at it and
 tap the notification that appears. If your camera will not read it, the address is
-written beside the code, `https://192.168.1.162:8080/`, and you can type that into
+written beside the code, `https://192.168.1.162:17123/`, and you can type that into
 Safari instead.
 
 **5. Tap Start listening**, and allow the microphone.

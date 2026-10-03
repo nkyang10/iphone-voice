@@ -310,35 +310,478 @@ namespace DictationBridge
         }
     }
 
+    // One log file for the whole run, crash.txt for anything that got away, and
+    // last-run.txt for "did the previous run finish".
+    //
+    // None of the Console.WriteLine calls below reach a person. This is a
+    // /target:winexe, so launched from Explorer it has no console window at all
+    // and they go nowhere. The file is the only record that survives, which is
+    // why the crash paths are the interesting part of this class: before this,
+    // a thread that threw outside a handler took the process down silently and
+    // left a log that simply stopped mid-sentence.
     internal static class Log
     {
         private static readonly object Gate = new object();
         private static readonly string Path = Store.File("dictation-bridge.log");
-
-        public static void Write(string message)
-        {
-            string line = DateTime.Now.ToString("HH:mm:ss") + "  " + message;
-            lock (Gate)
-            {
-                try
-                {
-                    // File.AppendAllText defaults to UTF-8, but be explicit: the
-                    // log carries Cantonese and emoji, and a lossy fallback mangles
-                    // them for good.
-                    File.AppendAllText(Path, line + Environment.NewLine, new UTF8Encoding(false));
-                }
-                catch (Exception) { }
-            }
-            Console.WriteLine(line);
-        }
+        private static readonly string CrashPath = Store.File("crash.txt");
+        private static readonly string RunPath = Store.File("last-run.txt");
 
         // Phone diagnostics go to their own file: verbose, and one write per
         // report rather than interleaved with the running log.
         private static readonly string DiagPath = Store.File("diagnostics.log");
 
-        // Keep the file from growing forever: keep the newest chunk and rename
-        // the old one. Phone diagnostics are small, but this runs daily.
+        // The main log rolls too. It used not to, because /status arrives every
+        // second or two for as long as the page is open and nobody ever deleted
+        // it. That left megabytes of poll noise with the startup and crash lines
+        // a user actually needs buried somewhere in the middle.
+        private const long MainMaxBytes = 2L * 1024 * 1024;
         private const long DiagMaxBytes = 4L * 1024 * 1024;
+        private const long CrashMaxBytes = 256L * 1024;
+
+        private static int _run;
+        private static bool _failed;
+        private static bool _ended;
+        private static string _reason = "no reason recorded";
+        private static string _quietKey;
+        private static int _quietCount;
+
+        public static void Write(string message)
+        {
+            string line = Stamp() + "  " + Escape(message);
+            lock (Gate)
+            {
+                FlushQuiet();
+                Append(line + Environment.NewLine);
+            }
+            Console.WriteLine(line);
+        }
+
+        // Startup instructions. Previously written straight to the console,
+        // which is to say: printed nowhere, unless someone happened to start the
+        // exe from a command prompt. They are the first thing anyone needs after
+        // a failed start, so they belong in the file too.
+        public static void Say(string message)
+        {
+            Write(message);
+        }
+
+        // Where startup got to. If the app dies without reaching the next
+        // marker, the last marker written is the answer, which is the whole
+        // point: startup runs before any window exists, so nothing else logs.
+        public static void Stage(string name)
+        {
+            Write("--- " + name);
+        }
+
+        // The phone polls /status every second or two for as long as the page is
+        // open. Written out in full that is thousands of near-identical lines a
+        // session. Collapse consecutive repeats and report the count: nothing is
+        // lost, and the lines that explain a death stay readable.
+        public static void Quiet(string message)
+        {
+            lock (Gate)
+            {
+                if (message == _quietKey)
+                {
+                    _quietCount++;
+                    return;
+                }
+                FlushQuiet();
+                _quietKey = message;
+                _quietCount = 0;
+            }
+            Write(message);
+        }
+
+        private static void FlushQuiet()
+        {
+            if (_quietCount <= 0) return;
+            Append(Stamp() + "    (" + _quietCount +
+                   " more identical line(s), suppressed; last one above)" +
+                   Environment.NewLine);
+            _quietCount = 0;
+            _quietKey = null;
+        }
+
+        // A failure somebody will actually want to read. Message-only logging is
+        // what makes a bug unreproducible, so the whole exception chain goes in,
+        // stack trace included, and it goes in escaped: exception text is
+        // localised, and a Chinese Windows otherwise puts non-ASCII into a file
+        // people open in whatever console they have.
+        public static void Detail(string message, Exception e)
+        {
+            Write(message);
+            foreach (string line in Chain(e)) Write(line);
+        }
+
+        // Something no handler caught. Goes to the log and to crash.txt, because
+        // "did it throw?" is the first question and crash.txt is a small file to
+        // attach. Also flips the run marker, so the next launch knows.
+        public static void Crash(Exception e, string where, bool terminating)
+        {
+            _failed = true;
+            var lines = new List<string>();
+            lines.Add("=== crash at " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                      " in " + where + (terminating ? ", process is going down" : "") + " ===");
+            lines.Add("run: " + _run);
+
+            Thread thread = null;
+            try { thread = Thread.CurrentThread; } catch (Exception) { }
+            if (thread != null)
+            {
+                lines.Add("thread: " + (thread.Name == null ? "(unnamed)" : thread.Name) +
+                          " managedId=" + thread.ManagedThreadId +
+                          " background=" + thread.IsBackground +
+                          " priority=" + thread.Priority);
+            }
+            lines.Add("uptime: " + (Environment.TickCount / 1000) + "s");
+            lines.Add("os: " + Safe(WinVersion));
+            lines.Add("app: " + Escape(Environment.Version.ToString()));
+            lines.Add("data: " + Escape(Store.Dir));
+            lines.Add("");
+            lines.AddRange(Chain(e));
+
+            lock (Gate)
+            {
+                Append(Stamp() + "  CRASH in " + where + Environment.NewLine);
+                foreach (string line in lines) Append("    " + Escape(line) + Environment.NewLine);
+                try
+                {
+                    Roll(CrashPath, CrashMaxBytes);
+                    // Raw UTF-8 here rather than escaped: this file is read in
+                    // Notepad and attached to a report, not pasted into a console
+                    // with an arbitrary code page. The log keeps the escapes.
+                    File.AppendAllText(CrashPath,
+                        string.Join(Environment.NewLine, lines.ToArray()) +
+                        Environment.NewLine,
+                        new UTF8Encoding(false));
+                }
+                catch (Exception) { }
+            }
+        }
+
+        private static List<string> Chain(Exception e)
+        {
+            var lines = new List<string>();
+            int depth = 0;
+            while (e != null && depth < 8)
+            {
+                string pad = new string(' ', 4 + depth * 2);
+                lines.Add(pad + e.GetType().FullName + ": " + e.Message);
+
+                if (e is SocketException)
+                {
+                    lines.Add(pad + "  socket error code: " +
+                              (int)((SocketException)e).ErrorCode + " " +
+                              ((SocketException)e).SocketErrorCode);
+                }
+                if (e is UnauthorizedAccessException)
+                    lines.Add(pad + "  permissions: the data folder or the cert store is not writable by this user");
+                if (e is FileNotFoundException || e is DirectoryNotFoundException)
+                    lines.Add(pad + "  missing file: the folder it wanted does not exist or was deleted under us");
+                if (e is ObjectDisposedException)
+                    lines.Add(pad + "  disposed: something was closed or torn down while still in use");
+
+                if (!string.IsNullOrEmpty(e.Source))
+                    lines.Add(pad + "  source: " + e.Source);
+
+                if (!string.IsNullOrEmpty(e.StackTrace))
+                {
+                    foreach (string frame in e.StackTrace.Split('\n'))
+                    {
+                        if (frame.Trim().Length > 0) lines.Add(pad + "  at " + frame.Trim());
+                    }
+                }
+                else
+                {
+                    lines.Add(pad + "  (no stack trace: thrown before any managed frame ran)");
+                }
+
+                e = e.InnerException;
+                depth++;
+                if (e != null) lines.Add(pad + "caused by:");
+            }
+            if (e == null && depth == 0)
+                lines.Add("    (no exception object: the runtime reported one without detail)");
+            return lines;
+        }
+
+        // Installed before anything else runs. An exception that escapes a
+        // thread kills the process outright, and there is nothing on screen to
+        // show for it: no console, no window yet at startup.
+        public static void InstallCrashHandlers()
+        {
+            try
+            {
+                // Without this, WinForms handles a UI-thread exception itself and
+                // shows its own dialog, so Application.ThreadException never fires.
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += (s, e) =>
+                {
+                    Crash(e.Exception, "the UI thread", false);
+                    // Carry on rather than exit. A paint or click handler that
+                    // throws does not mean the dictation path is broken, and
+                    // staying up is what lets the rest of the session be logged.
+                    if (_uiErrors < 5)
+                    {
+                        _uiErrors++;
+                        Box("Dictation Bridge hit a problem on its window.",
+                            e.Exception.GetType().Name + ": " + e.Exception.Message +
+                            "\r\n\r\nThe app has carried on. Everything is written to:\r\n" +
+                            Path);
+                    }
+                };
+            }
+            catch (Exception) { }
+
+            try
+            {
+                AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+                {
+                    Crash(e.ExceptionObject as Exception,
+                        e.IsTerminating ? "a thread with no handler" : "a background fault",
+                        e.IsTerminating);
+                };
+            }
+            catch (Exception) { }
+
+            try
+            {
+                // A faulted task nobody awaited would otherwise be swallowed
+                // silently by the default .NET 4 behaviour.
+                System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) =>
+                {
+                    Crash(e.Exception, "an unobserved task", false);
+                    e.SetObserved();
+                };
+            }
+            catch (Exception) { }
+
+            try
+            {
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => { EndRun(); };
+            }
+            catch (Exception) { }
+        }
+
+        private static int _uiErrors;
+
+        // Called first, before any work. Frames the session, records what the
+        // machine looks like, and reports whether the *previous* run finished.
+        // A crash cannot clean up after itself, so last-run.txt still says
+        // "running"; the next launch says so out loud, which is the difference
+        // between "it died" and "it exited" when someone is reading the log.
+        public static void BeginRun(string[] args)
+        {
+            string previous = null;
+            lock (Gate)
+            {
+                try
+                {
+                    if (File.Exists(RunPath)) previous = File.ReadAllText(RunPath);
+                }
+                catch (Exception) { }
+
+                // The counter lives only in this file, so carry it across launches.
+                // Restarting at 1 every time makes a log holding several runs
+                // impossible to follow, which is the one job this log has.
+                _run = 1 + NumberAfter(previous, "run:");
+
+                if (previous != null)
+                {
+                    if (previous.IndexOf("state: running", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        Write("** the previous run did NOT shut down cleanly: it was killed, or");
+                        Write("** it crashed somewhere nothing could catch. Its marker was:");
+                        foreach (string line in previous.Split('\n'))
+                        {
+                            if (line.Trim().Length > 0) Write("**   " + line.Trim());
+                        }
+                    }
+                    else
+                    {
+                        foreach (string line in previous.Split('\n'))
+                        {
+                            if (line.Trim().Length > 0) Write("previous run: " + line.Trim());
+                        }
+                    }
+                }
+
+                try
+                {
+                    File.WriteAllText(RunPath, Marker("running", "still starting"),
+                        new UTF8Encoding(false));
+                }
+                catch (Exception) { }
+            }
+
+            Write("=== run " + _run + " starting ===");
+            Write("  when:    " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            Write("  exe:     " + AppDomain.CurrentDomain.BaseDirectory);
+            Write("  args:    " + (args == null || args.Length == 0 ? "(none)" : string.Join(" ", args)));
+            Write("  os:      " + WinVersion() + "  x64=" + Safe(Arch));
+            Write("  osname:  registry says " + Safe(WinName));
+            Write("  runtime: " + Environment.Version + " (CLR " + Safe(Clr) + ")");
+            Write("  user:    " + Environment.UserName);
+            Write("  console: " + (Safe(Redirected) == "true" ? "redirected, no window" : "attached"));
+            Write("  data:    " + Store.Dir);
+            Write("  log:     " + Path);
+            Write("  uptime:  " + (Environment.TickCount / 1000) + "s since boot");
+        }
+
+        private static string Arch()
+        {
+            string arch = Environment.GetEnvironmentVariable("PROCESSOR_ARCHITECTURE");
+            string wow = Environment.GetEnvironmentVariable("PROCESSOR_ARCHITEW6432");
+            if (!string.IsNullOrEmpty(wow)) arch = arch + " running as " + wow;
+            return string.IsNullOrEmpty(arch) ? "unknown" : arch;
+        }
+
+        // Environment.OSVersion lies here. Without a supportedOS manifest in the
+        // exe — and adding one changes how the app is shelled, so it is not worth
+        // it — Windows reports 6.2 for every modern release, which is useless in
+        // a bug report. The registry still has the truth, though its ProductName
+        // is itself stale: it says "Windows 10" on a Windows 11 machine. The
+        // build number is the only part worth trusting, so lead with that.
+        private static string WinVersion()
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey key =
+                    Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                        @"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    if (key == null) return Environment.OSVersion.ToString();
+                    object build = key.GetValue("CurrentBuild");
+                    if (build == null) return Environment.OSVersion.ToString();
+
+                    string text = "Windows build " + build;
+                    object ubr = key.GetValue("UBR");
+                    if (ubr != null) text += "." + ubr;
+                    string display = key.GetValue("DisplayVersion") as string;
+                    if (display != null) text += ", release " + display;
+                    return text;
+                }
+            }
+            catch (Exception)
+            {
+                return Environment.OSVersion.ToString();
+            }
+        }
+
+        // The registry's ProductName, kept separate and labelled, because it says
+        // "Windows 10" on Windows 11 and would otherwise be taken as the answer.
+        private static string WinName()
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey key =
+                    Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                        @"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    string name = key == null ? null : key.GetValue("ProductName") as string;
+                    return name == null
+                        ? "(unknown; trust the build number above)"
+                        : "\"" + name + "\" (this registry field is stale on Windows 11)";
+                }
+            }
+            catch (Exception)
+            {
+                return "(unavailable)";
+            }
+        }
+
+        private static string Clr()
+        {
+            return System.Runtime.InteropServices.RuntimeEnvironment.GetSystemVersion();
+        }
+
+        private static string Redirected()
+        {
+            return Console.IsOutputRedirected.ToString();
+        }
+
+        // A getter that throws must not take startup down with it. Windows 11
+        // exposes everything used here, but the exe is handed to strangers on
+        // whatever they have installed.
+        private static string Safe(Func<string> get)
+        {
+            try { return get(); } catch (Exception) { return "(unavailable)"; }
+        }
+
+        public static void SetReason(string why)
+        {
+            _reason = why;
+        }
+
+        public static void MarkFailed()
+        {
+            _failed = true;
+        }
+
+        public static void EndRun()
+        {
+            lock (Gate)
+            {
+                if (_ended) return;
+                _ended = true;
+                FlushQuiet();
+                try
+                {
+                    File.WriteAllText(RunPath,
+                        Marker(_failed ? "crashed" : "exited", _reason),
+                        new UTF8Encoding(false));
+                }
+                catch (Exception) { }
+            }
+            Write("=== run " + _run + " ended: " + _reason +
+                  (_failed ? "  [a crash was recorded]" : "") + " ===");
+        }
+
+        private static string Marker(string state, string reason)
+        {
+            return "state: " + state + Environment.NewLine +
+                   "reason: " + reason + Environment.NewLine +
+                   "run: " + _run + Environment.NewLine +
+                   "when: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                   Environment.NewLine;
+        }
+
+        // One integer field out of the run marker, so the counter and the quoted
+        // text above can never disagree.
+        private static int NumberAfter(string text, string label)
+        {
+            if (text == null) return 0;
+            foreach (string line in text.Split('\n'))
+            {
+                if (!line.StartsWith(label, StringComparison.OrdinalIgnoreCase)) continue;
+                int value;
+                if (int.TryParse(line.Substring(label.Length).Trim(), out value)) return value;
+            }
+            return 0;
+        }
+
+        // A startup failure that only reaches the log looks identical to the app
+        // never having run, so put it on screen as well.
+        public static void Fatal(string headline, string detail)
+        {
+            _failed = true;
+            Write("FATAL: " + headline);
+            if (!string.IsNullOrEmpty(detail)) Write("FATAL: " + detail);
+            Write("FATAL: nothing else will run. The full log is " + Path);
+            Box(headline, (detail == null ? "" : detail + "\r\n\r\n") +
+                         "The log is here, please send it:\r\n" + Path);
+        }
+
+        private static void Box(string headline, string body)
+        {
+            try
+            {
+                MessageBox.Show(body, "Dictation Bridge", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch (Exception) { }
+        }
 
         public static void WriteDiag(string report)
         {
@@ -346,7 +789,7 @@ namespace DictationBridge
             {
                 try
                 {
-                    RollDiag();
+                    Roll(DiagPath, DiagMaxBytes);
                     File.AppendAllText(DiagPath,
                         "===== " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " =====" +
                         Environment.NewLine + report + Environment.NewLine,
@@ -356,18 +799,55 @@ namespace DictationBridge
             }
         }
 
-        private static void RollDiag()
+        // Keep the file from growing forever: keep the newest chunk and rename
+        // the old one.
+        private static void Roll(string path, long max)
         {
             try
             {
-                if (!File.Exists(DiagPath)) return;
-                var info = new FileInfo(DiagPath);
-                if (info.Length < DiagMaxBytes) return;
-                string old = DiagPath + ".1";
+                if (string.IsNullOrEmpty(path)) return;
+                if (!File.Exists(path)) return;
+                var info = new FileInfo(path);
+                if (info.Length < max) return;
+                string old = path + ".1";
                 if (File.Exists(old)) File.Delete(old);
-                File.Move(DiagPath, old);
+                File.Move(path, old);
             }
             catch (Exception) { }
+        }
+
+        private static void Append(string text)
+        {
+            try
+            {
+                Roll(Path, MainMaxBytes);
+                // File.AppendAllText defaults to UTF-8, but be explicit: the
+                // log carries Cantonese and emoji, and a lossy fallback mangles
+                // them for good.
+                File.AppendAllText(Path, text, new UTF8Encoding(false));
+            }
+            catch (Exception) { }
+        }
+
+        private static string Stamp()
+        {
+            return DateTime.Now.ToString("HH:mm:ss");
+        }
+
+        // Non-ASCII becomes \uXXXX so the file survives any console code page.
+        // Same rule as Bridge.Describe, applied to everything that is not
+        // dictation text.
+        private static string Escape(string text)
+        {
+            if (text == null) return "";
+            var sb = new StringBuilder(text.Length + 16);
+            foreach (char c in text)
+            {
+                if (c >= 0x20 && c < 0x7f) sb.Append(c);
+                else if (c == '\t') sb.Append("    ");
+                else sb.Append("\\u").Append(((int)c).ToString("x4"));
+            }
+            return sb.ToString();
         }
     }
 
@@ -521,7 +1001,10 @@ namespace DictationBridge
             Action handler = Changed;
             if (handler != null)
             {
-                try { handler(); } catch (Exception) { }
+                // A listener that throws used to vanish. Quiet, because one bad
+                // status update would otherwise write a line per phone poll.
+                try { handler(); }
+                catch (Exception e) { Log.Quiet("a status listener threw " + e.GetType().Name); }
             }
         }
 
@@ -707,11 +1190,22 @@ namespace DictationBridge
 
     internal static class Servers
     {
+        // Not 8080. That is the single most contested port on a Windows machine:
+        // half the dev servers ever written default to it, and Docker Desktop
+        // hands out large reserved blocks that routinely swallow it. Someone
+        // reported the app simply vanishing because of exactly that.
+        public const int DefaultPort = 17123;
+
+        // Where the random fallback samples from, when the first choice is
+        // unusable. Private to this app, and below the OS dynamic port range.
+        private const int RandomLow = 17123;
+        private const int RandomHigh = 17999;
         // One port serves both the page and the socket. A separate socket port
         // meant a second TLS listener, and iOS failed that handshake while
         // accepting the identical certificate on the HTTP port. Sharing the
         // port keeps a single, proven TLS path.
-        public static void StartAll(Bridge bridge, string token, int port, byte[] pfx)
+        public static int StartAll(Bridge bridge, string token, int port, byte[] pfx,
+            bool allowFallback)
         {
             // One certificate for the life of the process. Per-connection imports
             // made things worse, not better.
@@ -725,19 +1219,201 @@ namespace DictationBridge
                 }
                 catch (Exception e)
                 {
-                    Log.Write("WARN: could not import certificate: " + e.Message);
+                    Log.Detail("WARN: could not import certificate", e);
                 }
             }
 
-            var listener = new TcpListener(IPAddress.Any, port);
-            listener.Start();
+            // A bare listener.Start() used to end the process on a busy port: the
+            // bind happens before any window exists, so nothing caught it and a
+            // winexe has no console to print to. Probe instead.
+            //
+            // AccessDenied is the interesting one and not what it looks like. It
+            // is not a conflict -- nothing is listening -- it is Windows saying
+            // "this port is reserved", which Hyper-V, WSL2 and Docker Desktop all
+            // do in large blocks.
+            Exception firstError = null;
+
+            // Candidates in the order they get tried.
+            var candidates = new List<int>();
+            candidates.Add(port);
+            if (allowFallback)
+            {
+                // Random, not sequential. Walking upward was the obvious fix and it
+                // is the wrong one: a reserved block can be thousands of ports
+                // wide, so 8080, 8081, 8082... walks straight into the next one.
+                // Sampling finds a free port in one step whatever the block size.
+                //
+                // The range is private to this app and deliberately below the OS
+                // dynamic port range. Those are a bad place to run a server: they
+                // are in active use by outgoing connections, so a listener there
+                // can be stolen out from under us.
+                var picks = new List<int>();
+                var random = new Random();
+                // Bounded, not "loop until we have enough": this only ever adds a
+                // port it has not seen, so asking for more distinct ports than the
+                // range holds would spin forever. Keep the two numbers in step.
+                for (int i = 0; i < 40 && picks.Count < RandomHigh - RandomLow; i++)
+                {
+                    int candidate = RandomLow + random.Next(RandomHigh - RandomLow + 1);
+                    if (candidate != port && !picks.Contains(candidate)) picks.Add(candidate);
+                }
+                candidates.AddRange(picks);
+            }
+
+            int rejected = 0;
+            foreach (int candidate in candidates)
+            {
+                var listener = new TcpListener(IPAddress.Any, candidate);
+                try
+                {
+                    listener.Start();
+                }
+                catch (SocketException e)
+                {
+                    try { listener.Stop(); } catch (Exception) { }
+                    if (firstError == null) firstError = e;
+                    rejected++;
+                    // Name the first few so the reason is legible, then count the
+                    // rest: 41 identical lines helps nobody.
+                    if (rejected <= 8)
+                    {
+                        Log.Write("port " + candidate + " is not usable: socket error " +
+                                  (int)e.ErrorCode + " (" + e.SocketErrorCode + ")" +
+                                  ((SocketError)e.ErrorCode == SocketError.AccessDenied
+                                      ? " -- reserved by Windows, not in use" : ""));
+                    }
+                    continue;
+                }
+
+                // Reported whether the loop succeeded or ran out, because on failure
+                // this count is the only summary there is.
+                if (rejected > 8)
+                {
+                    Log.Write("... and " + (rejected - 8) + " more unusable port(s)");
+                }
+                if (candidate != port)
+                {
+                    Log.Write("port " + port + " was unusable, so the app moved to " +
+                              candidate + " instead");
+                }
+                Log.Write("listener bound to port " + candidate);
+                Accept(listener, bridge, token, cert, candidate);
+                return candidate;
+            }
+
+            if (rejected > 8)
+            {
+                Log.Write("... and " + (rejected - 8) + " more unusable port(s)");
+            }
+            Log.Write("FATAL: none of the " + candidates.Count +
+                      " ports tried were usable, starting at " + port);
+            SocketException firstSocket = firstError as SocketException;
+            if (firstSocket != null)
+            {
+                if ((SocketError)firstSocket.ErrorCode == SocketError.AccessDenied)
+                {
+                    Log.Write("FATAL: Windows has reserved the ranges the app tried.");
+                    Log.Write("FATAL: Hyper-V, WSL2 and Docker Desktop reserve large blocks.");
+                    Log.Write("FATAL: The reserved ranges on this machine:");
+                    foreach (string line in ReservedRanges()) Log.Write("FATAL:   " + line);
+                }
+                else
+                {
+                    Log.Write("FATAL: another program already has those ports open.");
+                }
+            }
+            Log.Write("FATAL: start the app with  --port <number>  outside those ranges.");
+            throw firstError;
+        }
+
+        // There is no managed API for the excluded-port list, so ask netsh. Its
+        // headings are localised but the rows are bare numbers, so they can be
+        // matched without understanding the language. Anything unrecognised is
+        // passed through rather than dropped: this is a diagnostic, and a
+        // diagnostic that quietly loses lines is worse than a ragged one.
+        private static List<string> ReservedRanges()
+        {
+            var lines = new List<string>();
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(
+                    "netsh.exe", "interface ipv4 show excludedportrange protocol=tcp");
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.CreateNoWindow = true;
+                string output = "";
+                using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi))
+                {
+                    // Read before WaitForExit: waiting first can deadlock on a
+                    // full pipe, and this is a startup diagnostic that must not
+                    // become one.
+                    output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(5000);
+                }
+
+                foreach (string raw in output.Split('\n'))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0) continue;
+                    if (line.IndexOf('*') >= 0) continue;   // managed-port marker
+
+                    // Split on runs of whitespace: netsh pads its columns with
+                    // spaces, so a plain Split(' ') yields a dozen empty strings
+                    // and the row never matches.
+                    var parts = new List<string>();
+                    foreach (string piece in line.Split(' ', '\t'))
+                    {
+                        if (piece.Length > 0) parts.Add(piece);
+                    }
+                    if (parts.Count != 2) continue;
+                    if (!Digits(parts[0]) || !Digits(parts[1])) continue;
+                    lines.Add(parts[0] + " - " + parts[1]);
+                }
+                if (lines.Count == 0)
+                {
+                    lines.Add("(could not parse the list; run  netsh interface ipv4 " +
+                              "show excludedportrange protocol=tcp  to see it)");
+                }
+            }
+            catch (Exception)
+            {
+                lines.Add("(could not run netsh; run  netsh interface ipv4 " +
+                          "show excludedportrange protocol=tcp  to see it)");
+            }
+            return lines;
+        }
+
+        private static bool Digits(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            foreach (char c in text)
+            {
+                if (c < '0' || c > '9') return false;
+            }
+            return true;
+        }
+
+        private static void Accept(TcpListener listener, Bridge bridge, string token,
+            X509Certificate2 cert, int port)
+        {
             new Thread(() =>
             {
                 while (true)
                 {
                     TcpClient client;
                     try { client = listener.AcceptTcpClient(); }
-                    catch (Exception) { break; }
+                    catch (Exception e)
+                    {
+                        // Expected on shutdown. Anything else means the listener is
+                        // dead and every request will now fail, so say which it was
+                        // rather than breaking out in silence.
+                        if (!(e is InvalidOperationException) &&
+                            !(e is ObjectDisposedException))
+                        {
+                            Log.Detail("listener stopped accepting connections", e);
+                        }
+                        break;
+                    }
                     new Thread(() => Handle(client, bridge, token, null, cert, port))
                     { IsBackground = true }.Start();
                 }
@@ -832,7 +1508,12 @@ namespace DictationBridge
                 int q = path.IndexOf('?');
                 if (q >= 0) path = path.Substring(0, q);
 
-                Log.Write(method + " " + path + " from " + remote + " body=" + want);
+                // Quiet, not Write: the phone polls /status every second or two and
+                // those repeats would bury the startup and crash lines. The
+                // client's ephemeral port is left out of the key, or nothing would
+                // ever match and nothing would be suppressed.
+                Log.Quiet(method + " " + path + " from " + Host(remote) +
+                          " body=" + want);
 
                 string outBody;
                 string outType = "text/plain; charset=utf-8";
@@ -925,12 +1606,23 @@ namespace DictationBridge
             }
             catch (Exception e)
             {
-                Log.Write("connection error: " + e.GetType().Name + " - " + e.Message);
+                // Full detail: this is the catch that used to swallow a crash on a
+                // per-connection thread down to a type name and a message.
+                Log.Detail("connection error", e);
             }
             finally
             {
                 try { client.Close(); } catch (Exception) { }
             }
+        }
+
+        // Drops the ephemeral port from "192.168.1.58:54786". Nothing needs it,
+        // and it changes on every request, which defeats any repeat detection.
+        private static string Host(string endpoint)
+        {
+            if (string.IsNullOrEmpty(endpoint)) return endpoint;
+            int colon = endpoint.LastIndexOf(':');
+            return colon <= 0 ? endpoint : endpoint.Substring(0, colon);
         }
 
         // Cheap fingerprint of the embedded page. Changes whenever the page is
@@ -973,7 +1665,11 @@ namespace DictationBridge
                         using (var reader = new StreamReader(s, Encoding.UTF8))
                         {
                             _page = reader.ReadToEnd();
-                            Log.Write("serving the embedded page (" + _page.Length + " bytes)");
+                            // "loaded", not "serving": this runs once, and the
+                            // startup version stamp now triggers it before any
+                            // request arrives.
+                            Log.Write("page loaded from the embedded resource (" +
+                                      _page.Length + " bytes)");
                             return _page;
                         }
                     }
@@ -995,7 +1691,7 @@ namespace DictationBridge
                 if (System.IO.File.Exists(candidate))
                 {
                     _page = System.IO.File.ReadAllText(candidate);
-                    Log.Write("serving index.html from disk (" + _page.Length + " bytes)");
+                    Log.Write("page loaded from disk instead (" + _page.Length + " bytes)");
                     return _page;
                 }
             }
@@ -2380,7 +3076,25 @@ private void BuildUi(Control host)
             quitItem.Click += (s, e) =>
             {
                 _reallyQuitting = true;
+                Log.SetReason("quit from the tray menu");
                 ExitThread();
+            };
+
+            // The log is the only record this app leaves, and with no console
+            // window finding it means hunting through AppData-style folders. Put
+            // it one click away and select the file, ready to attach.
+            var logItem = new ToolStripMenuItem("Show the log file");
+            logItem.Click += (s, e) =>
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start("explorer.exe",
+                        "/select,\"" + Store.File("dictation-bridge.log") + "\"");
+                }
+                catch (Exception ex)
+                {
+                    Log.Detail("could not open the log file", ex);
+                }
             };
 
             var copyItem = new ToolStripMenuItem("Copy page address");
@@ -2407,6 +3121,7 @@ private void BuildUi(Control host)
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(appItem);
             menu.Items.Add(copyItem);
+            menu.Items.Add(logItem);
             menu.Items.Add(quitItem);
 
 
@@ -2427,6 +3142,7 @@ private void BuildUi(Control host)
             _form.QuitRequested += () =>
             {
                 _reallyQuitting = true;
+                Log.SetReason("quit from the panel");
                 ExitThread();
             };
             _form.Show();
@@ -2495,26 +3211,63 @@ private void BuildUi(Control host)
         [STAThread]
         private static int Main(string[] args)
         {
+            // Before anything else: if this run dies from something we do not
+            // expect, these are the only things that can say so. Handlers go on
+            // first, then the session is framed, because everything after this
+            // point is work that can fail.
+            Log.InstallCrashHandlers();
+            Log.BeginRun(args);
+            try
+            {
+                return Run(args);
+            }
+            catch (Exception e)
+            {
+                Log.Crash(e, "startup", true);
+                Log.Fatal("Dictation Bridge stopped before it could start listening.",
+                    e.GetType().Name + ": " + e.Message);
+                return 1;
+            }
+            finally
+            {
+                // Also covers the paths that ended cleanly: without this the
+                // marker would still say "running" and the next launch would
+                // report a crash that never happened.
+                Log.EndRun();
+            }
+        }
+
+        private static int Run(string[] args)
+        {
             // One port serves the page, the status poll and dictation, so --port
             // is the only knob. The old --ws port is no longer used.
-            int httpPort = 8080;
+            int httpPort = Servers.DefaultPort;
+            bool portWasChosen = false;
             for (int i = 0; i < args.Length - 1; i++)
             {
                 if (args[i] == "--port" || args[i] == "--http")
                 {
                     int parsed;
-                    if (int.TryParse(args[i + 1], out parsed)) httpPort = parsed;
+                    if (int.TryParse(args[i + 1], out parsed))
+                    {
+                        httpPort = parsed;
+                        portWasChosen = true;
+                    }
                 }
             }
+            Log.Write("port: " + httpPort + (portWasChosen ? " (chosen on the command line)" : " (default)"));
 
             string token = Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            Console.WriteLine("Dictation Bridge");
-            Console.WriteLine("===============");
-            Console.WriteLine("Your files are in: " + Store.Dir);
-            Console.WriteLine();
+            Log.Say("Dictation Bridge");
+            Log.Say("===============");
+            Log.Say("Your files are in: " + Store.Dir);
+            Log.Say("");
 
+            Log.Stage("picking a network address");
             string ip = PrimaryAddress();
+
+            Log.Stage("certificate");
             X509Certificate2 cert = null;
             byte[] pfx = null;
             string caCerPath = null;
@@ -2529,7 +3282,9 @@ private void BuildUi(Control host)
             }
             catch (Exception e)
             {
-                Log.Write("WARN: could not create certificate, falling back to http: " + e.Message);
+                // Falling back to http is survivable but the reason matters: it
+                // is almost always the cert store or the data folder.
+                Log.Detail("WARN: could not create certificate, falling back to http", e);
             }
 
             bool secure = pfx != null;
@@ -2539,38 +3294,52 @@ private void BuildUi(Control host)
             // One port for the page and the socket. iOS accepted TLS on the HTTP
             // port but rejected it on a second listener using the same
             // certificate, so both now share the port that already worked.
-            Servers.StartAll(bridge, token, httpPort, pfx);
+            Log.Stage("starting the listener on port " + httpPort);
+            // Only move the port when it was not asked for. A port passed on the
+            // command line is a decision, usually because something else is
+            // already using the default, so it is never quietly second-guessed.
+            int boundPort = Servers.StartAll(bridge, token, httpPort, pfx, !portWasChosen);
+            if (boundPort != httpPort)
+            {
+                Log.Write("NOTE: the app is on port " + boundPort + " rather than " +
+                          httpPort + ". Use the address below and rescan the QR code.");
+            }
 
-            string url = scheme + "://" + ip + ":" + httpPort + "/";
+            string url = scheme + "://" + ip + ":" + boundPort + "/";
 
-            Log.Write("listening: " + scheme + " on " + httpPort + " (page and socket share it)");
+            Log.Write("listening: " + scheme + " on " + boundPort + " (page and socket share it)");
             Log.Write("open this on the phone: " + url);
             Log.Write("token: " + token);
+            Log.Write("embedded page version: " + Servers.PageVersion());
 
-            Console.WriteLine();
+            Log.Say("");
             if (secure)
             {
-                Console.WriteLine("  On the iPhone, once:");
-                Console.WriteLine("   1. Send this file to the phone and tap it:");
-                Console.WriteLine();
-                Console.WriteLine("        " + caCerPath);
-                Console.WriteLine();
-                Console.WriteLine("   2. Settings > General > VPN & Device Management > Install.");
-                Console.WriteLine("   3. Settings > General > About > Certificate Trust Settings");
-                Console.WriteLine("      > enable the Dictation Bridge certificate.");
-                Console.WriteLine("   4. Open:  " + url);
+                Log.Say("  On the iPhone, once:");
+                Log.Say("   1. Send this file to the phone and tap it:");
+                Log.Say("");
+                Log.Say("        " + caCerPath);
+                Log.Say("");
+                Log.Say("   2. Settings > General > VPN & Device Management > Install.");
+                Log.Say("   3. Settings > General > About > Certificate Trust Settings");
+                Log.Say("      > enable the Dictation Bridge certificate.");
+                Log.Say("   4. Open:  " + url);
             }
             else
             {
-                Console.WriteLine("  Open:  " + url);
+                Log.Say("  Open:  " + url);
             }
-            Console.WriteLine("  Tap Start once. After that, only the Windows hotkey matters.");
-            Console.WriteLine("  Ctrl+Alt+D toggles typing.");
-            Console.WriteLine();
+            Log.Say("  Tap Start once. After that, only the Windows hotkey matters.");
+            Log.Say("  Ctrl+Alt+D toggles typing.");
+            Log.Say("");
 
+            Log.Stage("building the panel");
             Application.EnableVisualStyles();
 
             TrayContext context = new TrayContext(bridge, token, url);
+
+            Log.Stage("running");
+            Log.Write("uptime at startup: " + (Environment.TickCount / 1000) + "s since boot");
             Application.Run(context);
             return 0;
         }
