@@ -177,7 +177,7 @@ button {
     stats: document.getElementById('stats')
   };
 
-  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0 };
+  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0, rewritesHeld: 0 };
   var token = null, wantRun = false;
   var history = [];
   var rec = null, lastEvent = 0, watchdog = null, restartTimer = null;
@@ -260,6 +260,9 @@ button {
       'watchdog stalls <b>' + stats.stalls + '</b><br>' +
       'results heard <b>' + stats.heard + '</b><br>' +
       'chunks streamed <b>' + stats.streamed + '</b><br>' +
+      'held back for accuracy <b>' + heldBack() + '</b> chars<br>' +
+      'corrections caught in time <b>' + stats.rewritesHeld + '</b><br>' +
+      'corrections too late <b>' + stats.rewrites + '</b><br>' +
       'posted to desktop <b>' + stats.sent + '</b><br>' +
       'waiting to send <b>' + outbox.length + '</b><br>' +
       'typed on desktop <b>' + serverTyped + '</b><br>' +
@@ -381,12 +384,12 @@ button {
 
   // ---- turning results into text to send ------------------------------------
 
-  // The slice of the recognizer's running text already sent. Interim results are
-  // cumulative: each one is the whole utterance so far, so the new text is simply
-  // what has appeared since the last look. Anchoring on content rather than on
-  // result index means a result turning final needs no special handling at all,
-  // which matters because on iOS it may never turn final.
+  // The slice of the recognizer's running text we have accounted for, and how much
+  // of it has actually been typed. The gap between the two is the hold-back.
   var streamAnchor = '';
+  var doneLen = 0;
+  // How many of the newest characters stay behind until iOS stops changing its mind.
+  var HOLD_CHARS = 10;
   // Last character actually sent, so a separator can be inserted between chunks
   // when the recognizer did not supply one.
   var typedTail = '';
@@ -437,44 +440,123 @@ button {
   // session as a rewrite of the old ones.
   function streamReset() {
     streamAnchor = '';
+    doneLen = 0;
   }
 
-  function streamFull(full) {
-    if (!full) return;
-    // True only for the first text of a recognizer, i.e. the one case where
-    // buildFull had no left context to work with.
-    var firstOfEpoch = (streamAnchor === '');
-    var delta = '';
-    if (full.length > streamAnchor.length &&
-        full.slice(0, streamAnchor.length) === streamAnchor) {
-      delta = full.slice(streamAnchor.length);
-    } else if (full !== streamAnchor) {
-      // Safari changed words that have already been typed. There is no way to take
-      // them back -- the desktop can only append -- so re-anchor on what the
-      // recognizer settled on and keep streaming from there. The misheard word
-      // stays wrong; the rest of the sentence still arrives, in order.
-      stats.rewrites++;
-      if (_rewriteNotedFor !== recSeq) {
-        _rewriteNotedFor = recSeq;
-        note('rewrite', 'recognizer changed text already sent; re-anchoring on ' + full.length + ' chars');
-      }
-    }
-    streamAnchor = full;
+  function commonPrefix(a, b) {
+    var n = Math.min(a.length, b.length), i = 0;
+    while (i < n && a.charAt(i) === b.charAt(i)) i++;
+    return i;
+  }
 
-    // The separator is a boundary repair, not a habit. Applying it to every chunk
-    // split words in half: a recognizer growing "hel" into "hello" hands over the
-    // delta "lo wor", which continues the same word and must not be spaced away
-    // from it. Inside one recognizer, buildFull has already put a space wherever a
-    // new result needed one. The only gap left is the very start of a session,
-    // where the new recognizer's result list has nothing before it and its first
-    // word would butt straight against the last word of the previous one.
-    var out = firstOfEpoch ? withSeparator(delta) : delta;
-    if (!out) return;
+  // Text is held back rather than sent the instant it is recognised.
+  //
+  // Safari is not finished with the last few characters of an interim result. It
+  // rewrites the word you are currently saying for roughly half a second after you
+  // say it -- "recognize spee" becomes "recognized speech" -- and everything the
+  // desktop has typed cannot be recalled, because KEYEVENTF_UNICODE cannot select
+  // or delete. Streaming with no delay therefore printed the mishearing *and* the
+  // correction, or at least printed the mishearing too eagerly to be useful.
+  //
+  // So the newest HOLD_CHARS characters stay behind and only older text is committed.
+  // By the time a character is that far back, iOS has usually stopped changing its
+  // mind, and the corrections happen while the text is still on the phone. That is the
+  // whole trade: a tenth of a second of lag bought with accuracy, on text that costs
+  // nothing to send.
+  //
+  // A fixed offset is deliberate and imperfect. It is not a word boundary, so a commit
+  // can still land inside a word, and for Cantonese ten characters is ten syllables
+  // rather than two words. What makes it safe is that the hold is never permanent: a
+  // final result flushes it at once, a pause flushes it, and every path out of a
+  // recognizer flushes it. It delays text, it never loses it.
+  function heldBack() {
+    return streamAnchor.length - doneLen;
+  }
+
+  function commit(text) {
     stats.streamed++;
-    sentText += out;
+    sentText += text;
     if (sentText.length > 400) sentText = sentText.slice(sentText.length - 400);
     el.final.textContent = sentText;
-    enqueue(out);
+    enqueue(text);
+  }
+
+  function streamFull(full, isFinal) {
+    if (!full) return;
+    // A separator is only ever needed on the very first text of an epoch, and only
+    // when nothing from this epoch has been committed yet. Deciding it from
+    // streamAnchor alone was wrong: an epoch whose first few characters are all still
+    // inside the hold-back has an anchor already, so a flush of that same text lost
+    // its separator -- and gained one it should not have had, since it continues the
+    // same sentence.
+    var firstOfEpoch = (streamAnchor === '' && doneLen === 0);
+    var limit;
+
+    if (isFinal) {
+      // Safari has committed to this text, so there is nothing left to protect.
+      limit = full.length;
+    } else if (full.length >= streamAnchor.length &&
+               full.slice(0, streamAnchor.length) === streamAnchor) {
+      // Normal case: the recognizer only added to what it had already said.
+      limit = full.length - HOLD_CHARS;
+      if (limit < doneLen) limit = doneLen;
+    } else if (full !== streamAnchor) {
+      var keep = commonPrefix(streamAnchor, full);
+      if (keep < doneLen) {
+        // The rewrite reaches into text that has already been typed. Nothing can take
+        // it back, so treat the whole new text as dealt with and carry on from there:
+        // the wrong word stays wrong, the rest of the sentence still arrives in order.
+        stats.rewrites++;
+        if (_rewriteNotedFor !== recSeq) {
+          _rewriteNotedFor = recSeq;
+          note('rewrite', 'recognizer changed text already typed; re-anchoring on ' + full.length + ' chars');
+        }
+        streamAnchor = full;
+        doneLen = full.length;
+        return;
+      }
+      // The rewrite is entirely inside the held-back part, which is exactly where it
+      // was supposed to happen. Nothing typed is wrong, so commit only as far as the
+      // two texts still agree and let the hold-back do its job.
+      stats.rewritesHeld++;
+      if (_rewriteNotedFor !== recSeq) {
+        _rewriteNotedFor = recSeq;
+        note('rewrite', 'recognizer corrected text still held back; nothing was typed');
+      }
+      limit = keep;
+      if (limit < doneLen) limit = doneLen;
+    } else {
+      return;
+    }
+
+    if (limit <= doneLen) {
+      streamAnchor = full;
+      return;
+    }
+    var delta = full.slice(doneLen, limit);
+    streamAnchor = full;
+    doneLen = limit;
+
+    // The separator is a boundary repair, not a habit. Applying it to every commit
+    // split words in half: a recognizer growing "hel" into "hello" hands over the
+    // delta "lo wor", which continues the same word and must not be spaced away from
+    // it. Inside one recognizer, buildFull has already put a space wherever a new
+    // result needed one. The only gap left is the very start of a session, where the
+    // new recognizer's result list has nothing before it and its first word would butt
+    // straight against the last word of the previous one.
+    commit(firstOfEpoch ? withSeparator(delta) : delta);
+  }
+
+  // Send whatever is still being held. Called whenever the recognizer can no longer
+  // change the text: a final result, a pause, the recognizer going away, the page
+  // being closed. Without these the last ten characters of every sentence would sit
+  // on the phone for ever.
+  function flushHeld() {
+    if (doneLen >= streamAnchor.length) return;
+    var text = streamAnchor.slice(doneLen);
+    var firstOfEpoch = (doneLen === 0);
+    doneLen = streamAnchor.length;
+    commit(firstOfEpoch ? withSeparator(text) : text);
   }
 
   // Safari sometimes never marks a result final, so the recognizer's volatile tail
@@ -492,12 +574,15 @@ button {
     el.interim.textContent = tail;
     clearTimeout(settleTimer);
     settleTimer = null;
-    if (tail) settleTimer = setTimeout(settleTail, SETTLE_MS);
+    if (tail) settleTimer = setTimeout(settle, SETTLE_MS);
   }
 
-  function settleTail() {
+  function settle() {
     settleTimer = null;
     el.interim.textContent = '';
+    // Nobody is talking, so iOS is not about to change this text either. Anything
+    // still held back goes now.
+    flushHeld();
   }
 
   // Polls the desktop and drains anything queued while it was unreachable.
@@ -709,6 +794,9 @@ button {
       sent: stats.sent,
       streamed: stats.streamed,
       rewrites: stats.rewrites,
+      rewritesHeld: stats.rewritesHeld,
+      heldChars: heldBack(),
+      holdChars: HOLD_CHARS,
       errors: stats.errors,
       pending: outbox.length,
       wantRun: wantRun,
@@ -767,6 +855,11 @@ button {
     return sel && sel.value ? sel.value : 'zh-HK';
   }
 
+  function lastIsFinal(results) {
+    try { return !!(results.length && results[results.length - 1].isFinal); }
+    catch (e) { return false; }
+  }
+
   function newRecognizer() {
     var id = ++recSeq;
     var gesture = inGesture();
@@ -812,14 +905,17 @@ button {
       }
       note('result', '#' + id + ' results=' + ev.results.length +
         ' from=' + ev.resultIndex + ' chars=' + full.length +
-        ' sent=' + streamAnchor.length + ' runHeard=' + runHeard +
-        (stats.rewrites ? ' rewrites=' + stats.rewrites : '') +
+        ' typed=' + doneLen + ' held=' + heldBack() +
+        ' runHeard=' + runHeard +
+        (stats.rewrites || stats.rewritesHeld
+          ? ' rewrites=' + stats.rewrites + '/' + stats.rewritesHeld + ' held-safe'
+          : '') +
         (logWords && full ? ' words=[' + full + ']' : ''));
 
       showTail(ev.results);
       if (!full) return;
       runHeard++;
-      streamFull(full);
+      streamFull(full, lastIsFinal(ev.results));
     };
 
     r.onerror = function (ev) {
@@ -1014,6 +1110,11 @@ button {
 // stops the instance's own onend from scheduling yet another restart; it must be
 // set before abort(), never after.
 function retireCurrent() {
+    // Anything still held back belongs to the recognizer being retired, so it goes
+    // out before the streaming state is reset. Otherwise the last ten characters of
+    // every sentence would be dropped at each of the hundreds of re-arms a long
+    // session makes.
+    flushHeld();
     var old = rec;
     rec = null;
     if (old) old.retired = true;
@@ -1116,6 +1217,8 @@ function retireCurrent() {
     clearTimeout(restartTimer);
     clearTimeout(settleTimer);
     settleTimer = null;
+    // Stopping is the last chance to send whatever is being held.
+    flushHeld();
     var old = rec;
     rec = null;
     if (old) old.retired = true;
@@ -1197,7 +1300,6 @@ function retireCurrent() {
       retireCurrent();
       rec = newRecognizer();
       stats.sessions++;
-      streamReset();
       syncStartButton();
       try { rec.start(); } catch (e) { scheduleRestart(); }
     }
@@ -1207,8 +1309,10 @@ function retireCurrent() {
     wantRun = false;
     clearTimeout(settleTimer);
     settleTimer = null;
-    // Best effort only: a fetch started here usually does not finish, and there is
-    // no navigator.sendBeacon for a request that carries the token in a body.
+    // Last chance for the held-back characters. Best effort like the flush below: a
+    // fetch started here usually does not finish, and there is no navigator.sendBeacon
+    // for a request that carries the token in a body.
+    flushHeld();
     flushOutbox();
     try { if (rec) rec.abort(); } catch (e) {}
   });
@@ -1229,6 +1333,7 @@ function retireCurrent() {
         wantRun: wantRun, hasRec: !!rec, recStartedOk: recStartedOk,
         recEnded: recEnded, recFault: recFault || '',
         disabled: !!el.start.disabled, seq: recSeq,
+        held: heldBack(), doneLen: doneLen, anchorLen: streamAnchor.length,
         sinceLastEvent: Math.round((Date.now() - lastEvent) / 1000)
       };
     }

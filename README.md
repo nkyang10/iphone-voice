@@ -83,15 +83,23 @@ The dot and the line above it carry the detail — *idle*, *starting (zh-HK)*, *
 
 ### Why text arrives before you finish
 
-The page sends every partial result the instant the recognizer produces it, and the desktop
-types it straight away. A LAN request of a few dozen characters costs about as much as the
-packet header, so there is nothing to gain from holding words back.
+The page sends every partial result the instant the recognizer produces it, less the last
+ten characters. A LAN request of a few dozen characters costs about as much as the packet
+header, so there is nothing to gain from holding words back.
 
-The consequence is that **text cannot be corrected once typed**. iOS sometimes rewrites a
-word it misheard after you have already seen it, and there is no way to take a typed word
-back. The page does the best available thing: it leaves the wrong word alone, sends nothing
-for the rewrite, and carries on from the new text. The rest of the sentence still arrives in
-order.
+Those ten characters are held for a reason. Safari is not finished with the end of what
+you just said: it rewrites the current word for about half a second after you say it —
+*"recognize spee"* becomes *"recognized speech"*. Whatever the desktop has typed cannot be
+taken back, so the delay means the correction arrives while the text is still on the phone.
+In practice most mishearings never reach the screen at all.
+
+The hold is never permanent. A final result releases it at once, so it does not lag a
+sentence you have finished, and a pause, the recognizer ending, and Stop all release it
+too. What you lose is at most the last ten characters of a sentence mid-word.
+
+If a correction does reach text that was already typed — which happens when iOS changes
+something further back than ten characters — that word stays wrong. The page does not send
+the rewrite, so it is never typed twice, and the sentence continues in order.
 
 ## Everyday use
 

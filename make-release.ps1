@@ -248,10 +248,10 @@ There is no pause on the PC and no queue. One thing worth knowing: if you leave 
 listening with the phone face up, it will pick up room noise and type it, so leave the
 phone somewhere it cannot hear the room, or tap Stop when you are not using it.
 
-Words are typed as they are recognised, so a word iOS mishears cannot be taken back once
-it is on screen. iOS usually corrects itself about a second after you say it, which is
-too late to help. One wrong word is not unusual; the rest of the sentence still arrives in
-order.
+Words are typed as they are recognised, less the last ten characters, which are held back
+so that iOS can still correct itself. Most mishearings therefore never reach the screen. A
+correction that lands further back than that cannot be undone: the word stays wrong, but it
+is not typed twice and the sentence continues in order.
 
 Before first real use, set Settings > Display & Brightness > Auto-Lock to Never on the
 phone. A locked screen stops dictation.

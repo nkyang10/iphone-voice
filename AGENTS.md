@@ -174,11 +174,23 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
     with it.
   - Spacing belongs to the page, because only it knows where a result boundary was.
     `buildFull` inserts a space at a boundary inside one recognizer; `withSeparator`
-    handles only the first chunk of a recognizer, which has no left context. Applying a
-    separator to every chunk split words in half mid-utterance.
+    handles only the first commit of a recognizer, which has no left context. Applying a
+    separator to every chunk split words in half mid-utterance. A separator is needed when
+    `doneLen === 0`, **not** when `streamAnchor === ''`: an epoch whose opening characters
+    are all still inside the hold-back already has an anchor, and flushing that text then
+    inserted a space into the middle of a sentence.
   - One ordered outbox, drained head first. A failed chunk stays at the head and is
     retried by the status poll. The old code pushed failures onto a side list and let the
     next chunk post immediately, which could reorder a sentence.
+- **The newest `HOLD_CHARS` characters are deliberately not sent.** iOS rewrites the word
+  you are currently saying for about half a second after you say it, and typed text cannot
+  be recalled, so streaming with no delay printed the mishearing as eagerly as it could be
+  corrected. Holding the tail means most corrections land while the text is still on the
+  phone. The offset is deliberately not a word boundary, so it is imperfect for both
+  English and Cantonese; what makes it safe is that `flushHeld()` runs on a final result,
+  on the settle timer, in `retireCurrent()`, in `stop()` and in `pagehide`. It delays text,
+  it never loses it. Two counters describe it: `rewritesHeld` (caught in time) and
+  `rewrites` (landed on typed text and cannot be fixed).
 - The page must stay dependency-free. It is served to a phone over a LAN.
 
 ## Things that will bite you
@@ -226,10 +238,13 @@ sent rather than held: the interim path was originally local-only, so an utteran
 never finalised never reached the desktop at all, and the fix for the watchdog churn
 ("an idle recognizer stays open indefinitely") made that path far more reachable.
 
-**Streaming means a misheard word cannot be fixed.** Expect users to report one. The
-answer is in the README, and the diagnostic counters are `rewrites` in the phone's report.
-Do not add a desktop-side buffer or a select-and-retype path to fix it: that is the gate
-this design removed.
+**Streaming means a misheard word usually never appears, and occasionally cannot be
+fixed.** The hold-back catches most corrections. The ones that slip through are corrections
+further back than `HOLD_CHARS`, and those are unfixable: the rewrite is not sent, so the
+word is not typed twice, and the sentence continues in order. Expect users to report a
+stray word anyway. The counters are `rewritesHeld` and `rewrites` in the phone's report.
+Do not add a desktop-side buffer or a select-and-retype path: that is the gate this design
+removed.
 
 **A language error must not loop.** `language-not-supported` walks a fallback chain and
 stops with a visible message. The original code retried the same rejected code silently,
