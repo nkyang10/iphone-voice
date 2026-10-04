@@ -176,7 +176,7 @@ button {
     stats: document.getElementById('stats')
   };
 
-  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0 };
+  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0 };
   var token = null, wantRun = false;
   var history = [];
   var pending = [];
@@ -515,6 +515,7 @@ button {
       sessions: stats.sessions,
       stalls: stats.stalls,
       heard: stats.heard,
+      deaf: stats.deaf,
       sent: stats.sent,
       errors: stats.errors,
       pending: pending.length,
@@ -688,6 +689,53 @@ button {
     stats.stalls++;
     setRec('warn', 'recovering from stall');
     rearm("watchdog-stall")
+  }, 2000);
+
+  // Silence after a successful start, which is a different failure and was not
+  // detected at all.
+  //
+  // lastEvent is refreshed by onstart as well as by results and errors, so while
+  // the user keeps tapping Start the stall watchdog can never fire: every tap
+  // resets the clock. That is exactly what a report from a real phone showed --
+  // ten sessions, every onstart delivered, errors 0, stalls 0, and not one
+  // syllable heard. The recognizer was alive and deaf.
+  //
+  // iOS reports nothing for this. There is no no-speech event, no error, and no
+  // end: the session just sits there. So measure the silence against the last
+  // thing actually recognised and, if there is one, walk the language chain --
+  // an accepted-but-silent language is the likeliest cause, and the chain already
+  // knows how to move on.
+  var DEAF_MS = 7000;
+  var _deafNotedFor = 0;
+
+  setInterval(function () {
+    if (!wantRun || !rec) return;
+    // Heard something at some point in this run: silence is normal then, because
+    // nobody is talking.
+    if (stats.heard > 0) return;
+    var quiet = Date.now() - lastEvent;
+    if (quiet < DEAF_MS) return;
+
+    if (_deafNotedFor !== recSeq) {
+      _deafNotedFor = recSeq;
+      note('deaf', 'started but nothing heard in ' + Math.round(quiet / 1000) +
+           's on ' + activeLang + '; walking the language chain');
+    }
+    stats.deaf++;
+    setRec('warn', 'hearing nothing, trying the next language');
+    if (nextLang() === null) {
+      // Every language in the chain started and heard nothing. Say so plainly
+      // instead of restarting the same dead language forever.
+      wantRun = false;
+      retireCurrent();
+      el.stop.disabled = true;
+      setRec('bad', 'nothing heard in any language');
+      warn('iOS started dictation but nothing was heard in any language (' +
+           langChain.join(', ') + '). This is usually a microphone or permission ' +
+           'problem rather than the page. Check Settings > Safari > Microphone, ' +
+           'then pick another language above and tap Start again.');
+      note('deaf', 'every language heard nothing; giving up until the next tap');
+    }
   }, 2000);
 
   // Abort and immediately re-arm: used when the language changes, when the
