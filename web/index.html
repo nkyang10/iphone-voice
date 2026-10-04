@@ -25,7 +25,8 @@
     background: #202124; color: #e8eaed; border: 1px solid #3c4043; flex: 1;
   }
   .val { font-size: 15px; font-variant-numeric: tabular-nums; color: #e8eaed; }
-  button {
+button {
+    touch-action: manipulation;
     font: inherit; padding: 15px; border-radius: 12px; border: 1px solid #3c4043;
     background: #202124; color: #e8eaed; width: 100%;
   }
@@ -519,8 +520,37 @@
       pending: pending.length,
       wantRun: wantRun,
       sinceStart: sessionStartedAt ? Math.round((Date.now() - sessionStartedAt) / 1000) : 0,
+      attempts: pastAttempts(),
       events: diag
     };
+  }
+
+  // The events list and the counters live in memory, so a reload erases both --
+  // and a reload is exactly what happens when the page version changes or Safari
+  // reuses a tab. That is how a failed Start ends up with no evidence at all: the
+  // report arrives describing a page that has never been pressed. Persist the last
+  // few attempts so the next report carries them across the reload.
+  var ATTEMPT_KEY = 'db-start-attempts';
+
+  function pastAttempts() {
+    try { return JSON.parse(localStorage.getItem(ATTEMPT_KEY) || '[]'); }
+    catch (e) { return []; }
+  }
+
+  function recordAttempt(entry) {
+    try {
+      var list = pastAttempts();
+      list.push(entry);
+      while (list.length > 8) list.shift();
+      localStorage.setItem(ATTEMPT_KEY, JSON.stringify(list));
+    } catch (e) { }
+  }
+
+  function clockNow() {
+    var d = new Date();
+    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' +
+      ('0' + d.getDate()).slice(-2) + ' ' + ('0' + d.getHours()).slice(-2) + ':' +
+      ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
   }
 
   function chosenLang() {
@@ -701,10 +731,21 @@ function retireCurrent() {
   // iOS wants a real gesture for every start(), so a re-pressable Start is
   // also the "tap to resume" affordance. Nothing else on the page can supply
   // that gesture.
-  function start() {
-    if (!SR) return;
+  function start(how) {
+    var at = clockNow();
+
+    // No recognizer support: bail out loud. This used to return silently, so the
+    // only sign was a button that did nothing at all.
+    if (!SR) {
+      setRec('bad', 'unsupported');
+      note('ui', 'start refused: this browser has no SpeechRecognition');
+      recordAttempt({ at: at, via: how || '?', outcome: 'no SpeechRecognition in this browser' });
+      return;
+    }
+
     warn('');
-    note('ui', 'start tapped, gesture=' + inGesture());
+    note('ui', 'start tapped via ' + (how || '?') + ', gesture=' + inGesture());
+    recordAttempt({ at: at, via: how || '?', outcome: 'starting', gesture: inGesture() });
     wantRun = true;
     sessionStartedAt = Date.now();
     el.stop.disabled = false;
@@ -729,9 +770,17 @@ function retireCurrent() {
     try {
       rec.start();
       lastEvent = Date.now();
+      recordAttempt({ at: at, via: how || '?',
+                      outcome: 'start() returned ok, waiting for onstart' });
     } catch (e) {
+      // Silent failure used to be the norm here: iOS can refuse start() without
+      // throwing and without ever sending onstart, so the page just sat there.
+      // Say it, and leave a trace in the status line the user can read.
       setRec('bad', 'start failed');
-      warn('Could not start the recognizer: ' + e.message);
+      warn('The browser refused to start dictation: ' + e.message +
+           ' — tap Start again, and if it keeps failing send a diagnostics report.');
+      recordAttempt({ at: at, via: how || '?', outcome: 'start() threw: ' + e.name + ': ' + e.message });
+      throw e;
     }
   }
 
@@ -751,8 +800,59 @@ function retireCurrent() {
     setRec('', 'stopped');
   }
 
-  el.start.addEventListener('click', start);
-  el.stop.addEventListener('click', stop);
+  // Fired from pointerdown, not from click.
+  //
+  // iOS Safari does not always synthesise click for a tap: a touch that Safari
+  // also reads as a small scroll produces pointerdown and touchend but no click,
+  // and the button then does nothing at all with no error anywhere. That is one
+  // candidate for "I tapped Start and it failed immediately" with an empty
+  // report. Acting on pointerdown removes that whole class of failure, and it
+  // also hands SpeechRecognition.start() the freshest possible gesture, which
+  // matters because iOS can require a live one.
+  //
+  // click is still handled, for keyboard activation and for desktop mice, and
+  // suppressed when it is only the tail of a pointerdown we already acted on.
+  // The window has to be tight: pointerdown and click for one tap land within
+  // milliseconds of each other, and a wide window here silently swallows a
+  // deliberate Stop-then-Start a moment later. stop() and start() also clear
+  // each other's timestamp, so the pair is never mistaken for one tap.
+  var _startTapAt = 0;
+  var _stopTapAt = 0;
+
+  function startTapped(ev) {
+    var type = ev ? ev.type : 'none';
+    if (type === 'click') {
+      if (Date.now() - _startTapAt < 250) return;
+      _startTapAt = Date.now();
+      start('click');
+      return;
+    }
+    // Let the mouse keep its click: a drag that starts on the button should not
+    // start dictating.
+    if (ev && ev.pointerType === 'mouse') return;
+    _startTapAt = Date.now();
+    _stopTapAt = 0;
+    start('pointerdown');
+  }
+
+  function stopTapped(ev) {
+    var type = ev ? ev.type : 'none';
+    if (type === 'click') {
+      if (Date.now() - _stopTapAt < 250) return;
+      _stopTapAt = Date.now();
+      stop();
+      return;
+    }
+    if (ev && ev.pointerType === 'mouse') return;
+    _stopTapAt = Date.now();
+    _startTapAt = 0;
+    stop();
+  }
+
+  el.start.addEventListener('pointerdown', startTapped);
+  el.start.addEventListener('click', startTapped);
+  el.stop.addEventListener('pointerdown', stopTapped);
+  el.stop.addEventListener('click', stopTapped);
 
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'visible' && wantRun && (!rec || Date.now() - lastEvent > STALL_MS)) {
