@@ -118,16 +118,24 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   be written from four event handlers, which is how they came to disagree. iOS
   requires a gesture per `start()`, so Start was made permanently re-pressable as the
   only tap-to-resume affordance; that made the button useless as an indicator, because
-  a button that is always live says nothing. It is now disabled for exactly as long as
-  the current recognizer could still be hearing -- `wantRun && rec && recStartedOk &&
-  !recEnded` -- and enabled once iOS has ended the session.
-- **An error must not enable the Start button.** It is the one signal that looks like
-  it means "stopped receiving" and is not. Safari raises recoverable errors mid-session
-  and keeps delivering results afterwards, so clearing the fault on `onerror` left the
-  button lit through words it was plainly receiving: a real report, recognizer working,
-  button never grey. `onend` is the only event that means the microphone is shut, and
-  the watchdog and the deaf timer both end in an `onend` or `wantRun` false, so the
-  button cannot be left stuck off. Errors drive the status line instead.
+  a button that is always live says nothing.
+- **The button's whole rule is `el.start.disabled = wantRun`.** Greyed while the page
+  is still trying to listen; tappable once nothing is running and nothing is on its
+  way. Two more literal rules were tried and both were wrong in the direction that
+  matters:
+  - clearing it on `onerror` -- Safari raises recoverable errors mid-session and keeps
+    delivering results afterwards, so it stayed lit through words it was plainly
+    hearing. A real phone report: recognizer working, button never grey.
+  - clearing it on `onend` -- iOS ends a continuous session readily and the page
+    re-arms it 250ms later, so it spent much of its time lit while dictation worked
+    fine. A restart the page is about to do by itself is not a reason to invite a tap.
+- **Every path out of a working recognizer must end in `wantRun = false`**, because
+  that is the only thing that brings the button back and the button must never be
+  stuck greyed. The language chain running out, a blocked microphone, a refused
+  `start()`, and the wedge watchdog giving up all do it. The watchdog is bounded at
+  `MAX_WEDGE_RESTARTS` for this reason, with `STALL_RETRY_MS` for the retries so
+  handing back does not take most of a minute; `onstart` resets the count, so it
+  bounds consecutive fruitless attempts and never fires on a merely quiet phone.
 - **A disabled button is not automatically inert.** `startTapped` and `stopTapped`
   both bail on `el.start.disabled` / `el.stop.disabled` first. A synthetic
   `pointerdown` reaches the handler on a disabled control, and iOS Safari is not
@@ -136,6 +144,10 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   exists to report on.
 - The page's `runHeard` is per-Start; the page-lifetime `stats.heard` was what let the
   deaf timer below stay switched off for the rest of the session.
+- The diagnostics report carries `btnDisabled`, `btnRule`, `hasRec`, `recStarted` and
+  `recEnded`. Keep them: a report saying the button was lit while words arrived was
+  unexplainable from outside, because every event was logged but not the one variable
+  that decides the button.
 - Text is **streamed, not committed per utterance**, and `Injector.TypeText` is called
   with `appendSpace: false`. The page sends the recognizer's interim results as they
   arrive; the desktop appends each chunk into the focused window. Three consequences

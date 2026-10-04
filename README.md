@@ -70,16 +70,16 @@ whether you can press it, and that now follows the microphone:
 
 | The button | What it means |
 | --- | --- |
-| Blue, pressable | Stopped, or iOS has just let go. Tap to start. |
-| Greyed out | The microphone is open. Words will be typed. Nothing to do. |
+| Blue, pressable | Stopped, or the page gave up. Tap to start. |
+| Greyed out | The page is still trying to listen and words will be typed. Nothing to do. |
 
-Greyed out is the honest part: it is only greyed while the recognizer is genuinely live,
-and it comes back the instant iOS ends the session or reports an error, which is the only
-moment a tap can do anything. A button you can press all the time cannot tell you
-anything.
+It comes back on its own the moment dictation really stops: the microphone was refused,
+every language was tried, or the phone accepted dictation several times and never opened
+the microphone. Those are the only moments a tap can help, so those are the only moments
+it is offered. A greyed button therefore means one thing: it is working.
 
 The dot and the line above it carry the detail — *idle*, *starting (zh-HK)*, *listening*,
-*iOS stopped listening*.
+*recovering from stall*.
 
 ### Why text arrives before you finish
 

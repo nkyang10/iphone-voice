@@ -221,31 +221,32 @@ button {
   // Start used to be permanently re-pressable, because iOS wants a real gesture for
   // every start() and a re-pressable Start was the only tap-to-resume affordance on
   // the page. That made it useless as an indicator: a button that is always live
-  // says nothing. So it now follows the microphone -- greyed out for exactly as long
-  // as this recognizer is able to hear, tappable again once iOS has ended it.
+  // says nothing.
   //
-  // "Able to hear" is deliberately just onstart-without-onend, and nothing else.
-  // An earlier version also cleared the button on any error, which was wrong in the
-  // one direction that matters: Safari reports recoverable errors mid-session and
-  // keeps delivering results afterwards, so the button stayed lit through words it
-  // was plainly receiving -- a real phone report, with the recognizer working and
-  // the button never going grey. An error is not proof the recognizer stopped, and
-  // it does not come with an onend when it recovers. The error still drives the
-  // status line, which is where the detail belongs.
+  // It now has exactly one rule: greyed while the page is still trying to listen,
+  // tappable once nothing is running and nothing is on its way. So it is greyed for
+  // the whole time dictation is working, and comes back the moment it stops working.
   //
-  // What does clear it is onend, which is the one signal iOS does send when it has
-  // genuinely shut the microphone. Recovery from a wedged or deaf recognizer is
-  // already handled by the watchdog and the deaf timer, and both end in either an
-  // onend or wantRun false -- so the button cannot be left stuck off.
+  // Two earlier versions tracked the recognizer's events more closely and were both
+  // wrong in the direction that matters, which is worth recording. One cleared the
+  // button on any error: Safari raises recoverable errors mid-session and keeps
+  // delivering results afterwards, so it stayed lit through words it was plainly
+  // hearing. The other cleared it on onend, because iOS does end a continuous
+  // session readily and the page re-arms it 250ms later -- so the button spent much
+  // of its time lit while dictation was working fine, and the only thing a user
+  // could tell from looking at it was that iOS had paused. A restart the page is
+  // about to do by itself is not a reason to invite a tap.
+  //
+  // Nothing can strand the button greyed, because every path out of a working
+  // recognizer ends in wantRun false: the language chain running out, a blocked
+  // microphone, a refused start(), or the wedge watchdog giving up after four
+  // attempts that never even delivered onstart. Those are the moments a tap is the
+  // only thing that can help, so those are the moments it is offered.
   //
   // The label never changes. It stays the word you already know how to find; the
   // dot and status line above carry the detail.
   function syncStartButton() {
-    // Enabled only where a tap would actually help. While start() is still waiting
-    // for its onstart it stays disabled, so a second tap cannot land mid-handshake
-    // and build another recognizer on top of the one being started.
-    var canStart = !wantRun || !rec || recEnded;
-    el.start.disabled = !canStart;
+    el.start.disabled = wantRun;
     el.stop.disabled = !wantRun;
   }
 
@@ -714,6 +715,19 @@ button {
       recStarted: recStartedOk,
       recEnded: recEnded,
       recFault: recFault || '',
+      // What the button is actually showing, and why. A report saying the button
+      // was lit while words were arriving used to be unexplainable from the outside:
+      // every event was logged, but the one variable that decides the button was not,
+      // so there was no way to tell a stale page from a live one disagreeing with
+      // itself. These four fields answer it directly.
+      hasRec: !!rec,
+      btnDisabled: !!el.start.disabled,
+      btnLabel: el.start.textContent,
+      btnRule: !wantRun ? 'not-running'
+             : !rec ? 'no-recognizer'
+             : recEnded ? 'ios-ended'
+             : !recStartedOk ? 'waiting-onstart'
+             : 'live',
       sinceStart: sessionStartedAt ? Math.round((Date.now() - sessionStartedAt) / 1000) : 0,
       attempts: pastAttempts(),
       events: diag
@@ -779,6 +793,7 @@ button {
       note('start', '#' + id);
       recStartedOk = true;
       recFault = '';
+      wedgeRestarts = 0;
       lastEvent = Date.now();
       setRec('ok', 'listening');
       syncStartButton();
@@ -859,11 +874,11 @@ button {
       if (r.retired) { note('end', '#' + id + ' (retired)'); return; }
       note('end', '#' + id);
       lastEvent = Date.now();
-      // iOS shut the microphone itself. That is the one moment the user actually
-      // needs to know, and it arrives before the automatic re-arm does.
+      // iOS shut the microphone itself. Recorded for the report, but deliberately
+      // not handed to the button: the page is about to re-arm by itself, and a
+      // restart it is going to do anyway is not a reason to invite a tap. See
+      // syncStartButton().
       recEnded = true;
-      syncStartButton();
-      setRec('', 'iOS stopped listening');
       if (wantRun) scheduleRestart();
     };
 
@@ -894,12 +909,42 @@ button {
   //
   // So only a recognizer that never confirmed counts as wedged: start() was
   // accepted and iOS then said nothing at all.
+  //
+  // And it is only re-armed a bounded number of times. Rebuilding for ever cannot
+  // fix a device that accepts start() and never starts the microphone, and the Start
+  // button stays greyed throughout because the page is technically still trying --
+  // which tells the user nothing except that dictation is dead. A real onstart resets
+  // the count, so this bounds consecutive fruitless attempts only, and never fires on
+  // a phone that is merely quiet.
+  //
+  // The first stall waits the full STALL_MS, because the first attempt deserves the
+  // benefit of the doubt. After that iOS either opens the microphone promptly or not
+  // at all, so the retries use a much shorter window -- otherwise handing control back
+  // would take the best part of a minute, which is long enough for a user to conclude
+  // the button is broken rather than the microphone.
+  var MAX_WEDGE_RESTARTS = 3;
+  var STALL_RETRY_MS = 5000;
+  var wedgeRestarts = 0;
+
   watchdog = setInterval(function () {
     if (!wantRun || !rec) return;
     if (recStartedOk) return;
-    if (Date.now() - lastEvent < STALL_MS) return;
+    var quiet = Date.now() - lastEvent;
+    if (quiet < (wedgeRestarts > 0 ? STALL_RETRY_MS : STALL_MS)) return;
     stats.stalls++;
     setRec('warn', 'recovering from stall');
+    wedgeRestarts++;
+    if (wedgeRestarts > MAX_WEDGE_RESTARTS) {
+      wantRun = false;
+      retireCurrent();
+      setRec('bad', 'dictation never started');
+      syncStartButton();
+      warn('iOS accepted ' + (wedgeRestarts) + ' attempts at dictation and never started the ' +
+           'microphone on any of them. Tap Start listening to try again, and send a report if it ' +
+           'keeps happening.');
+      note('giveup', 'wedged ' + wedgeRestarts + ' times in a row; handing control back');
+      return;
+    }
     rearm("watchdog-stall")
   }, 2000);
 
@@ -1054,6 +1099,10 @@ function retireCurrent() {
       // throwing and without ever sending onstart, so the page just sat there.
       // Say it, and leave a trace in the status line the user can read.
       setRec('bad', 'start failed');
+      // Nothing will retry this on its own, so hand the button straight back: the
+      // warning below tells the user to tap Start again, and a greyed button would
+      // make that advice impossible to follow.
+      wantRun = false;
       syncStartButton();
       warn('The browser refused to start dictation: ' + e.message +
            ' — tap Start again, and if it keeps failing send a diagnostics report.');
@@ -1141,7 +1190,11 @@ function retireCurrent() {
 
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'visible' && wantRun && (!rec || Date.now() - lastEvent > STALL_MS)) {
-      try { if (rec) rec.abort(); } catch (e) {}
+      // retireCurrent(), not a bare abort(). Aborting without retiring leaves the old
+      // instance free to deliver its onend, and that onend then sets recEnded on a
+      // page whose recognizer is the *new* one -- which lights the Start button while
+      // dictation is working, and schedules a second restart on top of this one.
+      retireCurrent();
       rec = newRecognizer();
       stats.sessions++;
       streamReset();
@@ -1170,6 +1223,14 @@ function retireCurrent() {
     queued: function () { return outbox.slice(); },
     button: function () {
       return { disabled: el.start.disabled, label: el.start.textContent, cls: el.start.className };
+    },
+    state: function () {
+      return {
+        wantRun: wantRun, hasRec: !!rec, recStartedOk: recStartedOk,
+        recEnded: recEnded, recFault: recFault || '',
+        disabled: !!el.start.disabled, seq: recSeq,
+        sinceLastEvent: Math.round((Date.now() - lastEvent) / 1000)
+      };
     }
   };
 
@@ -1237,7 +1298,10 @@ function retireCurrent() {
   setInterval(function () {
     if (wantRun) note('beat', 'sessions=' + stats.sessions + ' heard=' + stats.heard +
       ' chunks=' + stats.streamed + ' rewrites=' + stats.rewrites +
-      ' queued=' + outbox.length + ' btn=' + (recStartedOk && !recEnded && !recFault ? 'live' : 'tap') +
+      ' queued=' + outbox.length + ' btn=' + (el.start.disabled ? 'off' : 'ON') +
+      '/' + (!wantRun ? 'not-running' : !rec ? 'no-recognizer' : recEnded ? 'ios-ended'
+                  : !recStartedOk ? 'waiting-onstart' : 'live') +
+      ' fault=' + (recFault || '-') +
       ' sinceLast=' + Math.round((Date.now() - lastEvent) / 1000) + 's');
   }, 15000);
 
