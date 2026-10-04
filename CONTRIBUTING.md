@@ -116,7 +116,17 @@ someone unzips next to their phone does not need them.
 
 ## Publishing a release
 
-There is no automation for this, and the first attempt at it was a reminder of why.
+**Do not publish unless you were asked to.** Build the exe and stop there. `.\build.ps1`
+for a binary to test, `.\make-release.ps1` for the folder, and that is the end of it. The
+user tests a local build and decides when something is worth putting in front of anyone
+else, which is a decision that belongs to them and not to a build step. Committing and
+pushing are the same: asked for, not assumed.
+
+Replacing a published asset is not free either. GitHub cannot overwrite one, so it is
+delete-then-upload, and there is a window where the asset does not exist at all. Doing that
+unprompted, repeatedly, is how a release ends up briefly broken for anyone following it.
+
+There is no automation for publishing, and the first attempt at it was a reminder of why.
 `Invoke-WebRequest` in PowerShell 5.1 parses responses with the IE engine and throws a
 `WebException` with a **null `Response`** when a request *succeeds*. That reads exactly
 like a failure. Assuming it had failed and retrying created a duplicate release, and a
@@ -128,6 +138,7 @@ So:
   includes drafts when authenticated, so a `GET` is a safe probe and a `POST` is not.
 - Use `curl.exe`, which reports status plainly, for anything that mutates.
 - Never use a mutating call to read an error message.
+- Take the token from the git credential helper, never from a prompt or a literal.
 
 The token lives in the git credential helper (`credential.helper=manager`), so no token
 needs to be pasted into a shell, a script, or a commit. `gh` is not required and is not
