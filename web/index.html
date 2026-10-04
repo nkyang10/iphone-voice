@@ -181,6 +181,12 @@ button {
   var history = [];
   var pending = [];
   var rec = null, lastEvent = 0, watchdog = null, restartTimer = null;
+
+  // Whether the current recognizer has ever confirmed with onstart. Silence after
+  // that is an idle recognizer with nobody talking, which is the normal state;
+  // silence before it means start() was accepted and then wedged. Those need very
+  // different handling, so they are told apart here rather than guessed at.
+  var recStartedOk = false;
   var sessionStartedAt = 0, lastFinal = '';
   var lastInterim = '', lastDelivered = '', commitTimer = null;
   var recSeq = 0;
@@ -563,6 +569,7 @@ button {
     var id = ++recSeq;
     var gesture = inGesture();
     note('new', '#' + id + ' lang=' + activeLang + ' gesture=' + gesture);
+    recStartedOk = false;
 
     var r = new SR();
     r.lang = activeLang;
@@ -578,6 +585,7 @@ button {
     r.onstart = function () {
       if (r.retired) return;
       note('start', '#' + id);
+      recStartedOk = true;
       lastEvent = Date.now();
       setRec('ok', 'listening');
     };
@@ -683,8 +691,20 @@ button {
 
   // A hang produces no event at all, so silence has to be treated as failure.
   // Always abort and build a fresh instance; the same instance may be wedged.
+  //
+  // But silence on its own is not a hang, and treating it as one is worse than the
+  // fault it was meant to catch. A recognizer that has confirmed with onstart and
+  // is now quiet is an idle recognizer with nobody talking: the normal state, and
+  // on iOS 18 it stays that way indefinitely, never sending no-speech and never
+  // ending. Re-arming on a timer therefore rebuilt the recognizer every 14 seconds
+  // for as long as the page was open -- a real phone report showed sessions 64 and
+  // stalls 63 over fifteen minutes, while dictation itself worked perfectly.
+  //
+  // So only a recognizer that never confirmed counts as wedged: start() was
+  // accepted and iOS then said nothing at all.
   watchdog = setInterval(function () {
     if (!wantRun || !rec) return;
+    if (recStartedOk) return;
     if (Date.now() - lastEvent < STALL_MS) return;
     stats.stalls++;
     setRec('warn', 'recovering from stall');
@@ -710,6 +730,12 @@ button {
 
   setInterval(function () {
     if (!wantRun || !rec) return;
+    // Only a recognizer that actually started can be "started but deaf". One that
+    // never delivered onstart is wedged, which belongs to the watchdog above --
+    // letting this timer near it walked the language chain for a fault that has
+    // nothing to do with language, which is how a stuck recognizer ended up
+    // reporting langTries instead of stalls.
+    if (!recStartedOk) return;
     // Heard something at some point in this run: silence is normal then, because
     // nobody is talking.
     if (stats.heard > 0) return;
