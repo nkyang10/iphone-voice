@@ -103,6 +103,30 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   second one on the PC was a duplicate decision, not a safety net. It did mask
   room noise on a phone left face up, which is now a documented trade-off in the
   README rather than something the code hides.
+- The Start button's `disabled` state and label come from **`syncStartButton()` and
+  nowhere else**. It used to be written from four event handlers, which is how they
+  came to disagree. iOS requires a gesture per `start()`, so Start was made
+  permanently re-pressable as the only tap-to-resume affordance; that made the button
+  useless as an indicator, because a button that is always live says nothing. It is now
+  disabled exactly while a recognizer is genuinely live (`recStartedOk && !recEnded &&
+  !recFault`) and re-enabled the moment iOS ends the session or reports a fault. The
+  page's `runHeard` is per-Start; the page-lifetime `stats.heard` was what let the deaf
+  timer below stay switched off for the rest of the session.
+- Text is **streamed, not committed per utterance**, and `Injector.TypeText` is called
+  with `appendSpace: false`. The page sends the recognizer's interim results as they
+  arrive; the desktop appends each chunk into the focused window. Three consequences
+  are load-bearing:
+  - `KEYEVENTF_UNICODE` cannot select or delete, so **sent text is final**. The page
+    anchors on content (`streamAnchor`), and when Safari rewrites words already sent it
+    re-anchors and sends nothing for the rewrite, because there is nothing better to do
+    with it.
+  - Spacing belongs to the page, because only it knows where a result boundary was.
+    `buildFull` inserts a space at a boundary inside one recognizer; `withSeparator`
+    handles only the first chunk of a recognizer, which has no left context. Applying a
+    separator to every chunk split words in half mid-utterance.
+  - One ordered outbox, drained head first. A failed chunk stays at the head and is
+    retried by the status poll. The old code pushed failures onto a side list and let the
+    next chunk post immediately, which could reorder a sentence.
 - The page must stay dependency-free. It is served to a phone over a LAN.
 
 ## Things that will bite you
@@ -145,7 +169,15 @@ Node trims it, so every Node test passed while the browser failed. HTTP has no h
 to get wrong.
 
 **`interimResults = true` is deliberate.** Safari sometimes never sets `isFinal`. With
-final-only results you get no output at all, forever.
+final-only results you get no output at all, forever. This is also why interim text is
+sent rather than held: the interim path was originally local-only, so an utterance Safari
+never finalised never reached the desktop at all, and the fix for the watchdog churn
+("an idle recognizer stays open indefinitely") made that path far more reachable.
+
+**Streaming means a misheard word cannot be fixed.** Expect users to report one. The
+answer is in the README, and the diagnostic counters are `rewrites` in the phone's report.
+Do not add a desktop-side buffer or a select-and-retype path to fix it: that is the gate
+this design removed.
 
 **A language error must not loop.** `language-not-supported` walks a fallback chain and
 stops with a visible message. The original code retried the same rejected code silently,

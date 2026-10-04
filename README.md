@@ -44,7 +44,8 @@ Allow the microphone if you're asked. From here on, the phone needs nothing from
 
 **4. Talk**
 
-Start speaking. Your words are typed into whatever you're working in.
+Start speaking. Your words appear on the PC as you say them, word by word, not after you
+finish a sentence.
 
 That's it. You can put the phone down and forget about it.
 
@@ -62,11 +63,40 @@ switch is gone, so one honest warning: **if you leave the page listening with th
 up, it will pick up room noise and type it.** Put the phone somewhere it cannot hear the
 room, or tap Stop when you are not using it.
 
+### Reading the Start button
+
+The button tells you what iOS is actually doing, which is more than an on/off switch
+could:
+
+| The button | What it means |
+| --- | --- |
+| **Start listening**, blue, tappable | Stopped. Tap to begin. |
+| **Starting (zh-HK)**, dimmed | Asked iOS to listen; waiting for it to answer. |
+| **Listening (zh-HK)**, blue with a soft pulse | The microphone is open and words will be typed. Nothing to do. |
+| **Listening stopped - tap to resume**, amber | iOS shut the microphone. It re-arms by itself within a moment; tap if you would rather not wait. |
+| **Lost the microphone - tap to resume**, amber | iOS reported an error. Tapping rebuilds the recognizer. |
+
+The pulse is the honest part: it is only there while the recognizer is genuinely live.
+A button you can press all the time cannot tell you anything.
+
+### Why text arrives before you finish
+
+The page sends every partial result the instant the recognizer produces it, and the desktop
+types it straight away. A LAN request of a few dozen characters costs about as much as the
+packet header, so there is nothing to gain from holding words back.
+
+The consequence is that **text cannot be corrected once typed**. iOS sometimes rewrites a
+word it misheard after you have already seen it, and there is no way to take a typed word
+back. The page does the best available thing: it leaves the wrong word alone, sends nothing
+for the rewrite, and carries on from the new text. The rest of the sentence still arrives in
+order.
+
 ## Everyday use
 
 | | |
 | --- | --- |
 | Start / stop typing | **Start listening** on the phone page |
+| See if it is really hearing you | The Start button: **Listening** means the microphone is open |
 | Open the page on the phone | Scan the QR code in the panel |
 | See the panel again | Click the tray icon |
 | Move the panel | Drag it. It remembers where you left it |
@@ -99,7 +129,7 @@ The panel, collapsed to a single strip. The dot breathes while the phone is in t
 </p>
 
 Expand it with the **+** for the QR code, the address to type if the camera will not read
-it, and your last utterance.
+it, and what was typed most recently, filling in as you speak.
 
 ## Files it creates
 
@@ -203,13 +233,21 @@ the QR code says, or rescan it.
 The certificate isn't trusted. Go back to step 4 above, and check you're opening `https://`
 and not `http://`.
 
-**It works, then goes quiet after you stop talking for a while.**
-Tap **Start listening** again on the phone. If that wakes it up, your iOS wants a tap for
-every restart rather than restarting on its own.
-
 **The page shows your words but nothing gets typed.**
-Tap **Start listening** on the phone if you stopped it, and check the panel says
-**listening on the phone**.
+Check the Start button. If it says **Listening** the microphone is open and the page is
+sending, so the problem is between the phone and the PC: check it says *connected to
+desktop*, and that nothing is waiting to send.
+
+**It works, then goes quiet after you stop talking for a while.**
+That is normal. The recognizer stays open and waits for you, exactly as a phone call does,
+and the button keeps pulsing the whole time. Tap **Start listening** if you would rather
+rebuild it.
+
+**A word came out wrong and the next one did too.**
+Expected, and unavoidable: text is typed as it is recognised, and typed text cannot be
+un-typed. iOS rewrites a misheard word roughly a second after you say it, by which point it
+is already on screen. The page stops sending the rewrite and carries on, so one wrong word
+does not turn into a wrong sentence.
 
 **Nothing appears in the target program.**
 Check it isn't running as administrator. Open `data\dictation-bridge.log` — it will say

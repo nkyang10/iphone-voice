@@ -846,6 +846,12 @@ namespace DictationBridge
 
     internal static class Injector
     {
+        // appendSpace stays because it is still the right thing for a whole
+        // utterance, but the page no longer sends whole utterances: it streams every
+        // partial result the moment it appears, and a space appended to each chunk
+        // would double the spaces between words ("want" + "to" -> "want  to").
+        // The page owns spacing now, because only it knows where the recogniser put
+        // a boundary between two results.
         public static void TypeText(string text, bool appendSpace)
         {
             if (string.IsNullOrEmpty(text)) return;
@@ -937,6 +943,7 @@ namespace DictationBridge
         private readonly object _gate = new object();
         private int _typedCount;
         private string _lastTyped = "";
+        private string _recentTyped = "";
         private DateTime _lastSeen = DateTime.MinValue;
         private long _received;
 
@@ -957,9 +964,13 @@ namespace DictationBridge
             get { lock (_gate) { return _typedCount; } }
         }
 
+        // A rolling window rather than the last chunk. The phone streams partial
+        // results as they are recognised, so the most recent arrival is often a
+        // single word or character; showing that in the quote card would look like
+        // a broken app. What is worth watching is the sentence filling in.
         public string LastText
         {
-            get { lock (_gate) { return _lastTyped; } }
+            get { lock (_gate) { return _recentTyped; } }
         }
 
         public int Received
@@ -1012,11 +1023,21 @@ namespace DictationBridge
                 _received++;
             }
 
-            Injector.TypeText(text, true);
+            // No trailing space: the page streams deltas and already carries the
+            // separator the recogniser implied. Adding one per chunk types a space
+            // between every word.
+            Injector.TypeText(text, false);
             lock (_gate)
             {
                 _typedCount++;
                 _lastTyped = text;
+                _recentTyped += text;
+                // Keep the quote card a readable length rather than an ever-growing
+                // wall that the TextBox has to re-layout on every chunk.
+                if (_recentTyped.Length > 200)
+                {
+                    _recentTyped = _recentTyped.Substring(_recentTyped.Length - 200);
+                }
             }
             RaiseChanged();
         }
@@ -1053,7 +1074,7 @@ namespace DictationBridge
             lock (_gate)
             {
                 typed = _typedCount;
-                last = _lastTyped;
+                last = _recentTyped;
                 received = (int)_received;
                 present = (DateTime.UtcNow - _lastSeen).TotalSeconds < 10;
             }

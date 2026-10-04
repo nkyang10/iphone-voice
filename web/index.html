@@ -32,6 +32,20 @@ button {
   }
   button:disabled { opacity: .45; }
   #start { background: #1a73e8; border-color: #1a73e8; font-weight: 600; }
+  /* The Start button reports what the recogniser is actually doing, so it needs
+     three looks and not one. Blue and dimmed with a breathing ring means the
+     microphone is open and words will be typed. Amber and fully lit means iOS has
+     stopped listening and this is the thing to tap. */
+  #start.live:disabled { opacity: 1; animation: halo 2s ease-out infinite; }
+  #start.starting:disabled { opacity: .85; }
+  #start.resume { background: #e8710a; border-color: #e8710a; color: #241300; }
+  @keyframes halo {
+    from { box-shadow: 0 0 0 0 rgba(26, 115, 232, .55); }
+    to { box-shadow: 0 0 0 16px rgba(26, 115, 232, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #start.live:disabled { animation: none; box-shadow: 0 0 0 2px rgba(26, 115, 232, .55); }
+  }
   #stop { background: #202124; }
   .card {
     background: #16181c; border: 1px solid #2a2d31; border-radius: 12px;
@@ -149,7 +163,8 @@ button {
 
   var STALL_MS = 12000;
   var RESTART_MS = 250;
-  var COMMIT_MS = 1400;
+  // How long the recognizer's volatile tail stays on screen after it stops growing.
+  var SETTLE_MS = 1400;
   var POLL_MS = 1500;
 
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -176,10 +191,9 @@ button {
     stats: document.getElementById('stats')
   };
 
-  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0 };
+  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0 };
   var token = null, wantRun = false;
   var history = [];
-  var pending = [];
   var rec = null, lastEvent = 0, watchdog = null, restartTimer = null;
 
   // Whether the current recognizer has ever confirmed with onstart. Silence after
@@ -187,8 +201,12 @@ button {
   // silence before it means start() was accepted and then wedged. Those need very
   // different handling, so they are told apart here rather than guessed at.
   var recStartedOk = false;
-  var sessionStartedAt = 0, lastFinal = '';
-  var lastInterim = '', lastDelivered = '', commitTimer = null;
+  // Set when iOS ends the session itself, and when it reports an error that means
+  // the recognizer is no longer dependable. Both leave the microphone shut, and
+  // both are the only honest cue that it is time to hand control back to the user.
+  var recEnded = false, recFault = '';
+  var sessionStartedAt = 0, runHeard = 0;
+  var settleTimer = null;
   var recSeq = 0;
 
   function warn(msg) {
@@ -206,6 +224,61 @@ button {
     return 'fell back ' + langIndex + ' step' + (langIndex === 1 ? '' : 's');
   }
 
+  // The one place that decides what the Start button looks like and whether it
+  // works.
+  //
+  // It used to be written wherever a recognizer event happened, which is how four
+  // places ended up disagreeing about the same button. Every state is derived here
+  // from what actually happened to the recognizer instead, so there is nothing to
+  // forget to update: no recognizer, no start confirmation, an iOS end, an iOS
+  // error, or genuinely live.
+  //
+  // Disabled while live is the point. iOS requires a real gesture for every
+  // start(), so a re-pressable Start doubles as tap-to-resume, but as long as the
+  // microphone is open there is nothing for a tap to do -- and a button that can
+  // always be pressed cannot tell the user anything. Turning it into the state
+  // display means one glance says whether dictation is actually running, which is
+  // the question a walkie-talkie button cannot answer on its own.
+  function syncStartButton() {
+    if (!wantRun) {
+      el.start.disabled = false;
+      el.start.className = '';
+      el.start.textContent = 'Start listening';
+      el.stop.disabled = true;
+      return;
+    }
+    el.stop.disabled = false;
+
+    if (rec && !recStartedOk) {
+      el.start.disabled = true;
+      el.start.className = 'starting';
+      el.start.textContent = 'Starting (' + activeLang + ')';
+      return;
+    }
+    if (recEnded) {
+      el.start.disabled = false;
+      el.start.className = 'resume';
+      el.start.textContent = 'Listening stopped - tap to resume';
+      return;
+    }
+    if (recFault) {
+      el.start.disabled = false;
+      el.start.className = 'resume';
+      el.start.textContent = 'Lost the microphone - tap to resume';
+      return;
+    }
+    if (rec) {
+      el.start.disabled = true;
+      el.start.className = 'live';
+      el.start.textContent = 'Listening (' + activeLang + ')';
+      return;
+    }
+    // wantRun is set but there is no recognizer: mid-rearm, or a start that threw.
+    el.start.disabled = false;
+    el.start.className = 'resume';
+    el.start.textContent = 'Not listening - tap to start';
+  }
+
   function renderStats() {
     var secs = sessionStartedAt ? Math.round((Date.now() - sessionStartedAt) / 1000) : 0;
     el.stats.innerHTML =
@@ -214,9 +287,10 @@ button {
       'language fallbacks <b>' + stats.langTries + '</b><br>' +
       'recognizer sessions <b>' + stats.sessions + '</b><br>' +
       'watchdog stalls <b>' + stats.stalls + '</b><br>' +
-      'utterances heard <b>' + stats.heard + '</b><br>' +
+      'results heard <b>' + stats.heard + '</b><br>' +
+      'chunks streamed <b>' + stats.streamed + '</b><br>' +
       'posted to desktop <b>' + stats.sent + '</b><br>' +
-      'waiting to send <b>' + pending.length + '</b><br>' +
+      'waiting to send <b>' + outbox.length + '</b><br>' +
       'typed on desktop <b>' + serverTyped + '</b><br>' +
       'recognizer errors <b>' + stats.errors + '</b><br>' +
       'session uptime <b>' + secs + 's</b>';
@@ -243,14 +317,6 @@ button {
   // Plain HTTP, same origin as the page. No handshake to get wrong, and the
   // desktop learns the phone is alive from the status poll.
 
-  function send(msg) {
-    // Kept for the local transcript's benefit only; delivery is asynchronous.
-    if (pendingPost) return true;
-    return false;
-  }
-
-  var pendingPost = false;
-
   function post(path, payload) {
     return fetch(path, {
       method: payload ? 'POST' : 'GET',
@@ -263,27 +329,67 @@ button {
     });
   }
 
-  function pushToDesktop(text) {
-    pendingPost = true;
-    return post('/speak', { token: token, text: text })
+  // ---- streaming outbox ----------------------------------------------------
+  // Text goes out while it is still being spoken, not once the sentence is over.
+  //
+  // It used to wait for isFinal, which meant a sentence only appeared on the
+  // desktop after the speaker had finished saying it -- for a dictation tool the
+  // lag is the whole complaint. And because Safari sometimes never sets isFinal at
+  // all, that wait had no floor: interimResults is the safety net for exactly that
+  // case, but the interim path only ever recorded text locally, so an utterance
+  // could sit on the phone indefinitely and never reach the desktop at all.
+  //
+  // A LAN POST of a few dozen characters costs about as much as the packet header,
+  // so there is nothing to gain by batching and a lot to lose by delaying. The
+  // desktop types what arrives straight into the focused window, and KEYEVENTF_UNICODE
+  // cannot select or delete, so whatever is sent is typed for good.
+  //
+  // One queue, drained head first, one request in flight at a time. Order is the
+  // whole point: an earlier chunk that failed has to land before a later one, or
+  // the sentence arrives scrambled. The old code pushed failures onto a side list
+  // and let the next chunk post immediately, which could reorder them.
+
+  var MAX_QUEUE = 60;
+  var outbox = [];
+  var flushing = false;
+
+  function enqueue(text) {
+    if (!text) return;
+    // A phone left talking with the desktop asleep would otherwise queue every
+    // chunk until the tab died. Folding into the tail keeps both the text and its
+    // order while capping the backlog; what is already queued is never dropped.
+    if (outbox.length >= MAX_QUEUE) {
+      outbox[outbox.length - 1] += text;
+    } else {
+      outbox.push(text);
+    }
+    typedTail = text.charAt(text.length - 1);
+    updatePending();
+    flushOutbox();
+  }
+
+  function flushOutbox() {
+    if (flushing || outbox.length === 0) return;
+    flushing = true;
+    var chunk = outbox[0];
+    post('/speak', { token: token, text: chunk })
       .then(function () {
+        outbox.shift();
+        flushing = false;
         stats.sent++;
-        pending.length = 0;
+        stats.heard++;
+        pushLocal(chunk);
         updatePending();
-        return true;
+        flushOutbox();
       })
       .catch(function () {
-        pending.push(text);
-        updatePending();
-        return false;
-      })
-      .then(function (ok) {
-        pendingPost = false;
-        return ok;
+        // Leave it at the head. The next status poll retries from here, so nothing
+        // that was said is dropped because the Wi-Fi blinked.
+        flushing = false;
       });
   }
 
-  // Polls the desktop and flushes anything queued while offline.
+  // Polls the desktop and drains anything queued while it was unreachable.
   function pollStatus() {
     return post('/status').then(function (s) {
       el.wsDot.className = 'dot ok';
@@ -292,15 +398,7 @@ button {
       // arrives, and this page's Start button is the only on/off switch.
       el.typingState.textContent = 'straight into the focused window';
       serverTyped = s.typed;
-      if (pending.length > 0 && !pendingPost) {
-        var queued = pending.slice();
-        pending.length = 0;
-        var chain = Promise.resolve();
-        queued.forEach(function (t) {
-          chain = chain.then(function () { return pushToDesktop(t); });
-        });
-        return chain;
-      }
+      flushOutbox();
     }).catch(function () {
       el.wsDot.className = 'dot bad';
       el.wsLabel.textContent = 'desktop not reachable';
@@ -310,38 +408,153 @@ button {
 
   var serverTyped = 0;
 
-  // ---- local transcript + unsent queue --------------------------------------
+  // ---- turning results into text to send ------------------------------------
 
-  // Ships text to the desktop and records it locally. Order matters: the local
-  // record happens whether or not the socket accepts it.
-  function deliver(text, isInterim) {
-    if (!text) return;
-    if (isInterim && text === lastDelivered) return;
-    lastDelivered = text;
-    lastFinal = text;
-    el.final.textContent = text;
-    stats.heard++;
+  // The slice of the recognizer's running text already sent. Interim results are
+  // cumulative: each one is the whole utterance so far, so the new text is simply
+  // what has appeared since the last look. Anchoring on content rather than on
+  // result index means a result turning final needs no special handling at all,
+  // which matters because on iOS it may never turn final.
+  var streamAnchor = '';
+  // Last character actually sent, so a separator can be inserted between chunks
+  // when the recognizer did not supply one.
+  var typedTail = '';
+  var sentText = '';
+  var _rewriteNotedFor = 0;
 
-    pushLocal(text, isInterim);
-    if (isInterim) return;
-    pushToDesktop(text);
+  function isWide(c) {
+    // CJK, kana and fullwidth forms. Spelled as escapes on purpose: a literal range
+    // here is unreadable and silently breaks if the file's encoding is ever mangled.
+    // Cantonese is written without spaces, so a space injected between chunks would
+    // be worse than none.
+    if (!c) return false;
+    var n = c.charCodeAt(0);
+    return (n >= 0x2e80 && n <= 0x9fff) ||   // radicals, kana, CJK
+           (n >= 0xf900 && n <= 0xfaff) ||   // compatibility ideographs
+           (n >= 0xfe30 && n <= 0xfe4f) ||   // CJK compatibility forms
+           (n >= 0xff00 && n <= 0xff60) ||   // fullwidth forms
+           (n >= 0x3000 && n <= 0x303f);     // CJK punctuation
   }
 
-  // If Safari never marks a result final, commit whatever we last heard once
-  // the speaker goes quiet.
-  function scheduleCommit() {
-    clearTimeout(commitTimer);
-    commitTimer = setTimeout(function () {
-      commitTimer = null;
-      if (lastInterim) {
-        deliver(lastInterim, true);
-        lastInterim = '';
+  function isWideEdge(a, b) {
+    return !/\s$/.test(a) && !/^\s/.test(b) && !isWide(a.charAt(a.length - 1)) && !isWide(b.charAt(0));
+  }
+
+  function withSeparator(s) {
+    if (!s || !typedTail) return s;
+    if (isWideEdge(typedTail, s)) return ' ' + s;
+    return s;
+  }
+
+  // One string for the whole result list, with a separator added only where the
+  // recognizer produced a new result and left no space of its own. Deterministic,
+  // so the same event always rebuilds the same string and the anchor stays valid.
+  function buildFull(results) {
+    var out = '';
+    for (var i = 0; i < results.length; i++) {
+      var t = '';
+      try { t = results[i][0].transcript || ''; } catch (e) { t = ''; }
+      if (!t) continue;
+      if (out && isWideEdge(out, t)) out += ' ';
+      out += t;
+    }
+    return out;
+  }
+
+  // A new recognizer starts a fresh result list, so there is nothing left to
+  // continue: the anchor resets rather than treating the first words of the new
+  // session as a rewrite of the old ones.
+  function streamReset() {
+    streamAnchor = '';
+  }
+
+  function streamFull(full) {
+    if (!full) return;
+    // True only for the first text of a recognizer, i.e. the one case where
+    // buildFull had no left context to work with.
+    var firstOfEpoch = (streamAnchor === '');
+    var delta = '';
+    if (full.length > streamAnchor.length &&
+        full.slice(0, streamAnchor.length) === streamAnchor) {
+      delta = full.slice(streamAnchor.length);
+    } else if (full !== streamAnchor) {
+      // Safari changed words that have already been typed. There is no way to take
+      // them back -- the desktop can only append -- so re-anchor on what the
+      // recognizer settled on and keep streaming from there. The misheard word
+      // stays wrong; the rest of the sentence still arrives, in order.
+      stats.rewrites++;
+      if (_rewriteNotedFor !== recSeq) {
+        _rewriteNotedFor = recSeq;
+        note('rewrite', 'recognizer changed text already sent; re-anchoring on ' + full.length + ' chars');
       }
-    }, COMMIT_MS);
+    }
+    streamAnchor = full;
+
+    // The separator is a boundary repair, not a habit. Applying it to every chunk
+    // split words in half: a recognizer growing "hel" into "hello" hands over the
+    // delta "lo wor", which continues the same word and must not be spaced away
+    // from it. Inside one recognizer, buildFull has already put a space wherever a
+    // new result needed one. The only gap left is the very start of a session,
+    // where the new recognizer's result list has nothing before it and its first
+    // word would butt straight against the last word of the previous one.
+    var out = firstOfEpoch ? withSeparator(delta) : delta;
+    if (!out) return;
+    stats.streamed++;
+    sentText += out;
+    if (sentText.length > 400) sentText = sentText.slice(sentText.length - 400);
+    el.final.textContent = sentText;
+    enqueue(out);
   }
 
-  function pushLocal(text, isInterim) {
-    history.push({ t: text, time: new Date(), interim: !!isInterim });
+  // Safari sometimes never marks a result final, so the recognizer's volatile tail
+  // is shown live while it grows and cleared once it settles. What has been typed
+  // is accumulated above it and is never rewritten.
+  function showTail(results) {
+    var tail = '';
+    for (var i = results.length - 1; i >= 0; i--) {
+      if (!results[i].isFinal) {
+        try { tail = results[i][0].transcript || ''; } catch (e) { tail = ''; }
+        break;
+      }
+    }
+    tail = tail.replace(/^\s+/, '');
+    el.interim.textContent = tail;
+    clearTimeout(settleTimer);
+    settleTimer = null;
+    if (tail) settleTimer = setTimeout(settleTail, SETTLE_MS);
+  }
+
+  function settleTail() {
+    settleTimer = null;
+    el.interim.textContent = '';
+  }
+
+  // Polls the desktop and drains anything queued while it was unreachable.
+  function pollStatus() {
+    return post('/status').then(function (s) {
+      el.wsDot.className = 'dot ok';
+      el.wsLabel.textContent = 'connected to desktop';
+      // There is no armed flag to read any more: the desktop types whatever
+      // arrives, and this page's Start button is the only on/off switch.
+      el.typingState.textContent = 'straight into the focused window';
+      serverTyped = s.typed;
+      flushOutbox();
+    }).catch(function () {
+      el.wsDot.className = 'dot bad';
+      el.wsLabel.textContent = 'desktop not reachable';
+      el.typingState.textContent = 'unknown';
+    });
+  }
+
+  var serverTyped = 0;
+
+  // ---- local transcript ------------------------------------------------------
+  // One line per chunk, recorded when the desktop has confirmed it, so this list is
+  // a mirror of what was actually typed rather than of what was recognised. A
+  // mismatch between this and the desktop is the thing worth reporting.
+
+  function pushLocal(text) {
+    history.push({ t: text, time: new Date() });
     if (history.length > 200) history.shift();
     renderHistory();
   }
@@ -351,7 +564,7 @@ button {
     el.transcript.textContent = '';
     for (var i = 0; i < rows.length; i++) {
       var line = document.createElement('div');
-      line.className = rows[i].interim ? 'tline pending-line' : 'tline';
+      line.className = 'tline';
       var stamp = document.createElement('span');
       stamp.className = 'ttime';
       stamp.textContent = rows[i].time.toTimeString().slice(0, 8);
@@ -364,13 +577,13 @@ button {
   }
 
   function updatePending() {
-    if (pending.length === 0) {
+    if (outbox.length === 0) {
       el.pending.style.display = 'none';
     } else {
       el.pending.style.display = 'block';
       el.pendingText.textContent =
-        pending.length + ' utterance' + (pending.length === 1 ? '' : 's') +
-        ' waiting to send. Will retry automatically.';
+        outbox.length + ' chunk' + (outbox.length === 1 ? '' : 's') +
+        ' of speech waiting to send. Will retry automatically.';
     }
   }
 
@@ -523,9 +736,14 @@ button {
       heard: stats.heard,
       deaf: stats.deaf,
       sent: stats.sent,
+      streamed: stats.streamed,
+      rewrites: stats.rewrites,
       errors: stats.errors,
-      pending: pending.length,
+      pending: outbox.length,
       wantRun: wantRun,
+      recStarted: recStartedOk,
+      recEnded: recEnded,
+      recFault: recFault || '',
       sinceStart: sessionStartedAt ? Math.round((Date.now() - sessionStartedAt) / 1000) : 0,
       attempts: pastAttempts(),
       events: diag
@@ -570,12 +788,16 @@ button {
     var gesture = inGesture();
     note('new', '#' + id + ' lang=' + activeLang + ' gesture=' + gesture);
     recStartedOk = false;
+    recEnded = false;
+    recFault = '';
 
     var r = new SR();
     r.lang = activeLang;
     r.continuous = true;
-    // Safari sometimes never sets isFinal. If we only trust final results we
-    // get no output at all, so interim results are the safety net.
+    // Safari sometimes never sets isFinal. If we only trusted final results we
+    // would get no output at all; the interim results are the safety net, and the
+    // text is sent as it arrives rather than held until a verdict that may never
+    // come.
     r.interimResults = true;
     r.maxAlternatives = 1;
 
@@ -586,43 +808,33 @@ button {
       if (r.retired) return;
       note('start', '#' + id);
       recStartedOk = true;
+      recFault = '';
       lastEvent = Date.now();
       setRec('ok', 'listening');
+      syncStartButton();
     };
 
     r.onresult = function (ev) {
       if (r.retired) return;
-      note('result', '#' + id + ' results=' + ev.results.length +
-        ' from=' + ev.resultIndex);
       lastEvent = Date.now();
-      var finalText = '';
-      var interimText = '';
-      for (var i = ev.resultIndex; i < ev.results.length; i++) {
-        var chunk = ev.results[i][0].transcript;
-        if (ev.results[i].isFinal) finalText += chunk;
-        else interimText += chunk;
-      }
-      finalText = finalText.trim();
-      interimText = interimText.trim();
-      note('text', 'final=' + finalText.length + ' interim=' + interimText.length +
-        (logWords && finalText ? ' words=[' + finalText + ']' : ''));
-
-      if (interimText) {
-        // Show speech immediately, before any final verdict arrives.
-        el.interim.textContent = interimText;
-        if (!finalText) {
-          lastInterim = interimText;
-          pushLocal(interimText, true);
-          scheduleCommit();
+      var full = buildFull(ev.results);
+      var tail = '';
+      for (var t = ev.results.length - 1; t >= 0; t--) {
+        if (!ev.results[t].isFinal) {
+          try { tail = ev.results[t][0].transcript || ''; } catch (e) { tail = ''; }
+          break;
         }
       }
+      note('result', '#' + id + ' results=' + ev.results.length +
+        ' from=' + ev.resultIndex + ' chars=' + full.length +
+        ' sent=' + streamAnchor.length + ' runHeard=' + runHeard +
+        (stats.rewrites ? ' rewrites=' + stats.rewrites : '') +
+        (logWords && full ? ' words=[' + full + ']' : ''));
 
-      if (!finalText) return;
-      clearTimeout(commitTimer);
-      commitTimer = null;
-      lastInterim = '';
-      el.interim.textContent = '';
-      deliver(finalText, false);
+      showTail(ev.results);
+      if (!full) return;
+      runHeard++;
+      streamFull(full);
     };
 
     r.onerror = function (ev) {
@@ -645,7 +857,6 @@ button {
         if (nextLang() === null) {
           wantRun = false;
           retireCurrent();
-          el.stop.disabled = true;
           setRec('bad', 'no usable language');
           warn('iOS rejected ' + wantedLang + ' and every fallback (' +
                langChain.join(', ') + '). Pick a different language above and tap Start again.');
@@ -655,12 +866,19 @@ button {
       if (code === 'not-allowed' || code === 'service-not-allowed') {
         wantRun = false;
         retireCurrent();
-        el.stop.disabled = true;
         setRec('bad', 'mic blocked');
         warn('Microphone access is blocked for this site. Allow the microphone in ' +
              'Settings, then tap Start again.');
         return;
       }
+
+      // Everything below leaves a recognizer that cannot be trusted to still be
+      // hearing anything: iOS has said the session is in trouble, and it will not
+      // necessarily send onend afterwards to say so cleanly. Hand the button back
+      // so the user can see dictation needs attention rather than sitting there
+      // claiming to listen.
+      recFault = code;
+      syncStartButton();
       if (code === 'network') {
         setRec('warn', 'network retrying');
         return;
@@ -672,6 +890,11 @@ button {
       if (r.retired) { note('end', '#' + id + ' (retired)'); return; }
       note('end', '#' + id);
       lastEvent = Date.now();
+      // iOS shut the microphone itself. That is the one moment the user actually
+      // needs to know, and it arrives before the automatic re-arm does.
+      recEnded = true;
+      syncStartButton();
+      setRec('', 'iOS stopped listening');
       if (wantRun) scheduleRestart();
     };
 
@@ -736,9 +959,12 @@ button {
     // nothing to do with language, which is how a stuck recognizer ended up
     // reporting langTries instead of stalls.
     if (!recStartedOk) return;
-    // Heard something at some point in this run: silence is normal then, because
-    // nobody is talking.
-    if (stats.heard > 0) return;
+    // Heard something in this run: silence is normal then, because nobody is
+    // talking. Compared against the per-run counter, not the page-lifetime one --
+    // once a single word had ever been heard, the page-wide count stayed above
+    // zero for the rest of the session and this timer never fired again, so a
+    // second Start on the same page load could come up deaf and stay that way.
+    if (runHeard > 0) return;
     var quiet = Date.now() - lastEvent;
     if (quiet < DEAF_MS) return;
 
@@ -754,7 +980,6 @@ button {
       // instead of restarting the same dead language forever.
       wantRun = false;
       retireCurrent();
-      el.stop.disabled = true;
       setRec('bad', 'nothing heard in any language');
       warn('iOS started dictation but nothing was heard in any language (' +
            langChain.join(', ') + '). This is usually a microphone or permission ' +
@@ -779,6 +1004,12 @@ function retireCurrent() {
     rec = null;
     if (old) old.retired = true;
     try { if (old) old.abort(); } catch (e) { note('abortThrew', e.message); }
+    // A new recognizer begins a fresh result list, so the streaming anchor has to
+    // start over. Without this, the first words of the new session read as a
+    // rewrite of the last ones and nothing would be sent until it happened to line
+    // up again.
+    streamReset();
+    syncStartButton();
   }
 
   function rearm(reason) {
@@ -788,6 +1019,7 @@ function retireCurrent() {
 
     rec = newRecognizer();
     stats.sessions++;
+    syncStartButton();
     try {
       rec.start();
       note('startCalled', 'ok gesture=' + inGesture());
@@ -795,16 +1027,14 @@ function retireCurrent() {
     } catch (e) {
       note('startThrew', e.name + ': ' + e.message);
       setRec('warn', 'restart failed, retrying');
+      syncStartButton();
       scheduleRestart();
     }
   }
 
-  // Start is deliberately never disabled once the browser supports
-  // SpeechRecognition. Pressing it while already listening re-arms the
-  // recognizer instead of asking for Stop first, which is the whole point:
-  // iOS wants a real gesture for every start(), so a re-pressable Start is
-  // also the "tap to resume" affordance. Nothing else on the page can supply
-  // that gesture.
+  // Start doubles as the recognizer's state display and as the only thing on the
+  // page that can supply a real gesture to start(), so it lights up again the moment
+  // iOS stops the microphone. See syncStartButton().
   function start(how) {
     var at = clockNow();
 
@@ -822,7 +1052,10 @@ function retireCurrent() {
     recordAttempt({ at: at, via: how || '?', outcome: 'starting', gesture: inGesture() });
     wantRun = true;
     sessionStartedAt = Date.now();
-    el.stop.disabled = false;
+    // Per run, not per page load: the deaf timer below compares against it, and a
+    // counter left over from an earlier run would switch that check off for good
+    // after the first word ever spoken.
+    runHeard = 0;
 
     // Any recognizer still around is retired first, and it does not matter which
     // kind it is: either the live one from the run being resumed, or a leftover
@@ -841,6 +1074,7 @@ function retireCurrent() {
     rec = newRecognizer();
     stats.sessions++;
     setRec('warn', 'starting (' + activeLang + ')');
+    syncStartButton();
     try {
       rec.start();
       lastEvent = Date.now();
@@ -851,6 +1085,7 @@ function retireCurrent() {
       // throwing and without ever sending onstart, so the page just sat there.
       // Say it, and leave a trace in the status line the user can read.
       setRec('bad', 'start failed');
+      syncStartButton();
       warn('The browser refused to start dictation: ' + e.message +
            ' — tap Start again, and if it keeps failing send a diagnostics report.');
       recordAttempt({ at: at, via: how || '?', outcome: 'start() threw: ' + e.name + ': ' + e.message });
@@ -861,17 +1096,16 @@ function retireCurrent() {
   function stop() {
     wantRun = false;
     clearTimeout(restartTimer);
-    clearTimeout(commitTimer);
-    commitTimer = null;
-    lastInterim = '';
+    clearTimeout(settleTimer);
+    settleTimer = null;
     var old = rec;
     rec = null;
     if (old) old.retired = true;
     try { if (old) old.abort(); } catch (e) {}
-    el.start.disabled = false;
-    el.stop.disabled = true;
+    streamReset();
     el.interim.textContent = '';
     setRec('', 'stopped');
+    syncStartButton();
   }
 
   // Fired from pointerdown, not from click.
@@ -933,13 +1167,19 @@ function retireCurrent() {
       try { if (rec) rec.abort(); } catch (e) {}
       rec = newRecognizer();
       stats.sessions++;
+      streamReset();
+      syncStartButton();
       try { rec.start(); } catch (e) { scheduleRestart(); }
     }
   });
 
   window.addEventListener('pagehide', function () {
     wantRun = false;
-    clearTimeout(commitTimer);
+    clearTimeout(settleTimer);
+    settleTimer = null;
+    // Best effort only: a fetch started here usually does not finish, and there is
+    // no navigator.sendBeacon for a request that carries the token in a body.
+    flushOutbox();
     try { if (rec) rec.abort(); } catch (e) {}
   });
 
@@ -949,7 +1189,11 @@ function retireCurrent() {
   window.dictationBridge = {
     versionCheck: checkVersion,
     stats: function () { return stats; },
-    transcript: function () { return history.slice(); }
+    transcript: function () { return history.slice(); },
+    queued: function () { return outbox.slice(); },
+    button: function () {
+      return { disabled: el.start.disabled, label: el.start.textContent, cls: el.start.className };
+    }
   };
 
   // ---- diagnostics UI -------------------------------------------------------
@@ -1015,6 +1259,8 @@ function retireCurrent() {
   // visible in the report instead of looking like a dead page.
   setInterval(function () {
     if (wantRun) note('beat', 'sessions=' + stats.sessions + ' heard=' + stats.heard +
+      ' chunks=' + stats.streamed + ' rewrites=' + stats.rewrites +
+      ' queued=' + outbox.length + ' btn=' + (recStartedOk && !recEnded && !recFault ? 'live' : 'tap') +
       ' sinceLast=' + Math.round((Date.now() - lastEvent) / 1000) + 's');
   }, 15000);
 
@@ -1067,7 +1313,7 @@ function retireCurrent() {
   var lastReport = 0;
   setInterval(function () {
     if (!wantRun) return;
-    if (stats.errors === 0 || stats.heard > 0) return;
+    if (stats.errors === 0 || runHeard > 0) return;
     if (Date.now() - lastReport < 45000) return;
     lastReport = Date.now();
     note('auto', 'reporting: errors with nothing heard');
