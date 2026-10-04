@@ -2033,6 +2033,7 @@ namespace DictationBridge
     {
         private readonly Bridge _bridge;
         private readonly string _url;
+        private readonly ContextMenuStrip _panelMenu;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly System.Windows.Forms.Timer _pulse;
 
@@ -2061,10 +2062,11 @@ namespace DictationBridge
         private static readonly Size ExpandedSize = new Size(320, 318);
         private const string PositionFile = "dictation-bridge-position.txt";
 
-        public MainForm(Bridge bridge, string url)
+        public MainForm(Bridge bridge, string url, ContextMenuStrip panelMenu)
         {
             _bridge = bridge;
             _url = url;
+            _panelMenu = panelMenu;
 
             Text = "Dictation Bridge";
             FormBorderStyle = FormBorderStyle.None;
@@ -2094,6 +2096,7 @@ namespace DictationBridge
                 | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
 
             BuildUi(this);
+            UsePanelMenu(this);
             ResizeRounded();
             Resize += (s, e) => ResizeRounded();
 
@@ -2412,6 +2415,32 @@ private void BuildUi(Control host)
             c.MouseUp += OnDragEnd;
         }
 
+        // A right-click anywhere on the panel opens the tray menu, so the app does
+        // not need two places that explain what it can do.
+        //
+        // Assigning the same ContextMenuStrip to the form and to every control under
+        // it is what makes "anywhere" actually true. WinForms sends WM_CONTEXTMENU
+        // to the control under the cursor and never routes it up to a parent, so
+        // setting it on the form alone would work only on the few pixels that are
+        // genuinely the form -- and the panel is almost entirely children. Setting
+        // it on each child also replaces that child's own right-click behaviour,
+        // which is the part that would otherwise show two menus at once: the read-
+        // only TextBox draws the native edit menu itself.
+        //
+        // One instance, not a copy per control: ToolStripMenuItem is not thread
+        // safe, and the tray icon is still using the same one. Assigning it also
+        // means Shift+F10 and the context-menu key work on the panel, which they
+        // did not before.
+        private void UsePanelMenu(Control root)
+        {
+            if (_panelMenu == null) return;
+            root.ContextMenuStrip = _panelMenu;
+            foreach (Control child in root.Controls)
+            {
+                UsePanelMenu(child);
+            }
+        }
+
         // Rounded corners via a Region rather than a transparency key: the shape is
         // clipped at paint time so the card edges stay crisp and the text inside
         // keeps GDI antialiasing.
@@ -2569,7 +2598,9 @@ private void BuildUi(Control host)
             quitItem.Click += (s, e) =>
             {
                 _reallyQuitting = true;
-                Log.SetReason("quit from the tray menu");
+                // "from the tray menu" would be wrong half the time now that the
+                // same menu opens from a right-click on the panel.
+                Log.SetReason("quit from the menu");
                 ExitThread();
             };
 
@@ -2622,7 +2653,7 @@ private void BuildUi(Control host)
             };
             _tray.DoubleClick += (s, e) => ShowWindow();
 
-            _form = new MainForm(_bridge, url);
+            _form = new MainForm(_bridge, url, menu);
             _form.QuitRequested += () =>
             {
                 _reallyQuitting = true;

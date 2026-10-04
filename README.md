@@ -101,6 +101,7 @@ order.
 | See if it is really hearing you | The Start button: **greyed out** means the microphone is open |
 | Open the page on the phone | Scan the QR code in the panel |
 | See the panel again | Click the tray icon |
+| Anything the tray icon can do | Right-click anywhere on the panel — same menu |
 | Move the panel | Drag it. It remembers where you left it |
 | See what you said last | Shown in the panel as soon as it arrives |
 | If the port is taken | Run `DictationBridge.exe --port 8099` |
@@ -150,7 +151,8 @@ Two more are there for when something goes wrong:
 | `last-run.txt` | Says whether the last run finished cleanly. Still reading `running` means it was killed or crashed. |
 | `crash.txt` | Only exists if something threw. The full error and stack trace. |
 
-Right-click the tray icon and choose **Show the log file** to open the log in Explorer with
+Right-click the panel, or the tray icon, and choose **Show the log file** to open the log
+in Explorer with
 it already selected, ready to attach.
 
 ## Privacy

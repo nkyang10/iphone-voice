@@ -91,6 +91,16 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   so the form's own `OnMouseMove` never fires; each draggable control handles
   `MouseMove` itself and sets `Capture`. Save the position on drop, not on exit,
   so a crash or a task-manager kill does not lose it.
+- **A right-click anywhere on the panel must open the tray menu, so `UsePanelMenu`
+  walks the whole control tree**, not just the form. WinForms sends `WM_CONTEXTMENU`
+  to the control under the cursor and never routes it up to a parent, so a
+  form-level assignment would work only on the few pixels that are genuinely the
+  form. One shared `ContextMenuStrip` instance is used, not a copy per control:
+  `ToolStripMenuItem` is not thread safe and the tray icon is still using the same
+  one. Assigning it also *replaces* each control's own right-click behaviour, which
+  is what stops the read-only `TextBox` drawing its native edit menu alongside it.
+  Because it is a real `ContextMenuStrip`, Shift+F10 and the context-menu key work
+  on the panel too.
 - A `Close()` from a panel button is swallowed by the hide-to-tray `FormClosing`
   handler. Raise `QuitRequested` and let the tray context set `_reallyQuitting`;
   that is the only path that actually exits.
@@ -108,11 +118,16 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   be written from four event handlers, which is how they came to disagree. iOS
   requires a gesture per `start()`, so Start was made permanently re-pressable as the
   only tap-to-resume affordance; that made the button useless as an indicator, because
-  a button that is always live says nothing. It is now disabled while a recognizer is
-  live (`rec && recStartedOk && !recEnded && !recFault`), and enabled the moment iOS
-  ends the session or reports an error -- the only times a tap can do anything. The
-  dot and status line above it carry the detail; the button stays the word you already
-  know how to find.
+  a button that is always live says nothing. It is now disabled for exactly as long as
+  the current recognizer could still be hearing -- `wantRun && rec && recStartedOk &&
+  !recEnded` -- and enabled once iOS has ended the session.
+- **An error must not enable the Start button.** It is the one signal that looks like
+  it means "stopped receiving" and is not. Safari raises recoverable errors mid-session
+  and keeps delivering results afterwards, so clearing the fault on `onerror` left the
+  button lit through words it was plainly receiving: a real report, recognizer working,
+  button never grey. `onend` is the only event that means the microphone is shut, and
+  the watchdog and the deaf timer both end in an `onend` or `wantRun` false, so the
+  button cannot be left stuck off. Errors drive the status line instead.
 - **A disabled button is not automatically inert.** `startTapped` and `stopTapped`
   both bail on `el.start.disabled` / `el.stop.disabled` first. A synthetic
   `pointerdown` reaches the handler on a disabled control, and iOS Safari is not

@@ -210,7 +210,7 @@ button {
     return 'fell back ' + langIndex + ' step' + (langIndex === 1 ? '' : 's');
   }
 
-  // The one place that decides what the Start button looks like and whether it
+// The one place that decides what the Start button looks like and whether it
   // works.
   //
   // It used to be written wherever a recognizer event happened, which is how four
@@ -221,9 +221,22 @@ button {
   // Start used to be permanently re-pressable, because iOS wants a real gesture for
   // every start() and a re-pressable Start was the only tap-to-resume affordance on
   // the page. That made it useless as an indicator: a button that is always live
-  // says nothing. So it now follows the recognizer -- greyed out while the
-  // microphone is open, tappable again the moment iOS ends the session or reports
-  // an error, which is the only time a tap can do anything.
+  // says nothing. So it now follows the microphone -- greyed out for exactly as long
+  // as this recognizer is able to hear, tappable again once iOS has ended it.
+  //
+  // "Able to hear" is deliberately just onstart-without-onend, and nothing else.
+  // An earlier version also cleared the button on any error, which was wrong in the
+  // one direction that matters: Safari reports recoverable errors mid-session and
+  // keeps delivering results afterwards, so the button stayed lit through words it
+  // was plainly receiving -- a real phone report, with the recognizer working and
+  // the button never going grey. An error is not proof the recognizer stopped, and
+  // it does not come with an onend when it recovers. The error still drives the
+  // status line, which is where the detail belongs.
+  //
+  // What does clear it is onend, which is the one signal iOS does send when it has
+  // genuinely shut the microphone. Recovery from a wedged or deaf recognizer is
+  // already handled by the watchdog and the deaf timer, and both end in either an
+  // onend or wantRun false -- so the button cannot be left stuck off.
   //
   // The label never changes. It stays the word you already know how to find; the
   // dot and status line above carry the detail.
@@ -231,7 +244,7 @@ button {
     // Enabled only where a tap would actually help. While start() is still waiting
     // for its onstart it stays disabled, so a second tap cannot land mid-handshake
     // and build another recognizer on top of the one being started.
-    var canStart = !wantRun || !rec || recEnded || !!recFault;
+    var canStart = !wantRun || !rec || recEnded;
     el.start.disabled = !canStart;
     el.stop.disabled = !wantRun;
   }
@@ -829,13 +842,12 @@ button {
         return;
       }
 
-      // Everything below leaves a recognizer that cannot be trusted to still be
-      // hearing anything: iOS has said the session is in trouble, and it will not
-      // necessarily send onend afterwards to say so cleanly. Hand the button back
-      // so the user can see dictation needs attention rather than sitting there
-      // claiming to listen.
+      // Everything below leaves a recognizer that may not still be hearing
+      // anything: iOS has said the session is in trouble. The status line says so.
+      // The Start button deliberately does not, because a recoverable error does not
+      // end the session and nothing clears the flag if words keep arriving -- see
+      // syncStartButton().
       recFault = code;
-      syncStartButton();
       if (code === 'network') {
         setRec('warn', 'network retrying');
         return;
