@@ -65,19 +65,21 @@ room, or tap Stop when you are not using it.
 
 ### Reading the Start button
 
-The button tells you what iOS is actually doing, which is more than an on/off switch
-could:
+The button's label never changes. It always says **Start listening**. What changes is
+whether you can press it, and that now follows the microphone:
 
 | The button | What it means |
 | --- | --- |
-| **Start listening**, blue, tappable | Stopped. Tap to begin. |
-| **Starting (zh-HK)**, dimmed | Asked iOS to listen; waiting for it to answer. |
-| **Listening (zh-HK)**, blue with a soft pulse | The microphone is open and words will be typed. Nothing to do. |
-| **Listening stopped - tap to resume**, amber | iOS shut the microphone. It re-arms by itself within a moment; tap if you would rather not wait. |
-| **Lost the microphone - tap to resume**, amber | iOS reported an error. Tapping rebuilds the recognizer. |
+| Blue, pressable | Stopped, or iOS has just let go. Tap to start. |
+| Greyed out | The microphone is open. Words will be typed. Nothing to do. |
 
-The pulse is the honest part: it is only there while the recognizer is genuinely live.
-A button you can press all the time cannot tell you anything.
+Greyed out is the honest part: it is only greyed while the recognizer is genuinely live,
+and it comes back the instant iOS ends the session or reports an error, which is the only
+moment a tap can do anything. A button you can press all the time cannot tell you
+anything.
+
+The dot and the line above it carry the detail — *idle*, *starting (zh-HK)*, *listening*,
+*iOS stopped listening*.
 
 ### Why text arrives before you finish
 
@@ -96,7 +98,7 @@ order.
 | | |
 | --- | --- |
 | Start / stop typing | **Start listening** on the phone page |
-| See if it is really hearing you | The Start button: **Listening** means the microphone is open |
+| See if it is really hearing you | The Start button: **greyed out** means the microphone is open |
 | Open the page on the phone | Scan the QR code in the panel |
 | See the panel again | Click the tray icon |
 | Move the panel | Drag it. It remembers where you left it |
@@ -234,13 +236,13 @@ The certificate isn't trusted. Go back to step 4 above, and check you're opening
 and not `http://`.
 
 **The page shows your words but nothing gets typed.**
-Check the Start button. If it says **Listening** the microphone is open and the page is
+Check the Start button. If it is **greyed out** the microphone is open and the page is
 sending, so the problem is between the phone and the PC: check it says *connected to
 desktop*, and that nothing is waiting to send.
 
 **It works, then goes quiet after you stop talking for a while.**
 That is normal. The recognizer stays open and waits for you, exactly as a phone call does,
-and the button keeps pulsing the whole time. Tap **Start listening** if you would rather
+and the button stays greyed out the whole time. Tap **Start listening** if you would rather
 rebuild it.
 
 **A word came out wrong and the next one did too.**

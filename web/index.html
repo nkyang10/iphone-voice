@@ -32,20 +32,6 @@ button {
   }
   button:disabled { opacity: .45; }
   #start { background: #1a73e8; border-color: #1a73e8; font-weight: 600; }
-  /* The Start button reports what the recogniser is actually doing, so it needs
-     three looks and not one. Blue and dimmed with a breathing ring means the
-     microphone is open and words will be typed. Amber and fully lit means iOS has
-     stopped listening and this is the thing to tap. */
-  #start.live:disabled { opacity: 1; animation: halo 2s ease-out infinite; }
-  #start.starting:disabled { opacity: .85; }
-  #start.resume { background: #e8710a; border-color: #e8710a; color: #241300; }
-  @keyframes halo {
-    from { box-shadow: 0 0 0 0 rgba(26, 115, 232, .55); }
-    to { box-shadow: 0 0 0 16px rgba(26, 115, 232, 0); }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    #start.live:disabled { animation: none; box-shadow: 0 0 0 2px rgba(26, 115, 232, .55); }
-  }
   #stop { background: #202124; }
   .card {
     background: #16181c; border: 1px solid #2a2d31; border-radius: 12px;
@@ -230,53 +216,24 @@ button {
   // It used to be written wherever a recognizer event happened, which is how four
   // places ended up disagreeing about the same button. Every state is derived here
   // from what actually happened to the recognizer instead, so there is nothing to
-  // forget to update: no recognizer, no start confirmation, an iOS end, an iOS
-  // error, or genuinely live.
+  // forget to update.
   //
-  // Disabled while live is the point. iOS requires a real gesture for every
-  // start(), so a re-pressable Start doubles as tap-to-resume, but as long as the
-  // microphone is open there is nothing for a tap to do -- and a button that can
-  // always be pressed cannot tell the user anything. Turning it into the state
-  // display means one glance says whether dictation is actually running, which is
-  // the question a walkie-talkie button cannot answer on its own.
+  // Start used to be permanently re-pressable, because iOS wants a real gesture for
+  // every start() and a re-pressable Start was the only tap-to-resume affordance on
+  // the page. That made it useless as an indicator: a button that is always live
+  // says nothing. So it now follows the recognizer -- greyed out while the
+  // microphone is open, tappable again the moment iOS ends the session or reports
+  // an error, which is the only time a tap can do anything.
+  //
+  // The label never changes. It stays the word you already know how to find; the
+  // dot and status line above carry the detail.
   function syncStartButton() {
-    if (!wantRun) {
-      el.start.disabled = false;
-      el.start.className = '';
-      el.start.textContent = 'Start listening';
-      el.stop.disabled = true;
-      return;
-    }
-    el.stop.disabled = false;
-
-    if (rec && !recStartedOk) {
-      el.start.disabled = true;
-      el.start.className = 'starting';
-      el.start.textContent = 'Starting (' + activeLang + ')';
-      return;
-    }
-    if (recEnded) {
-      el.start.disabled = false;
-      el.start.className = 'resume';
-      el.start.textContent = 'Listening stopped - tap to resume';
-      return;
-    }
-    if (recFault) {
-      el.start.disabled = false;
-      el.start.className = 'resume';
-      el.start.textContent = 'Lost the microphone - tap to resume';
-      return;
-    }
-    if (rec) {
-      el.start.disabled = true;
-      el.start.className = 'live';
-      el.start.textContent = 'Listening (' + activeLang + ')';
-      return;
-    }
-    // wantRun is set but there is no recognizer: mid-rearm, or a start that threw.
-    el.start.disabled = false;
-    el.start.className = 'resume';
-    el.start.textContent = 'Not listening - tap to start';
+    // Enabled only where a tap would actually help. While start() is still waiting
+    // for its onstart it stays disabled, so a second tap cannot land mid-handshake
+    // and build another recognizer on top of the one being started.
+    var canStart = !wantRun || !rec || recEnded || !!recFault;
+    el.start.disabled = !canStart;
+    el.stop.disabled = !wantRun;
   }
 
   function renderStats() {
@@ -1128,6 +1085,13 @@ function retireCurrent() {
   var _stopTapAt = 0;
 
   function startTapped(ev) {
+    // The button is disabled while the microphone is open, and a tap then must do
+    // nothing at all. Do not rely on the browser to swallow the event: dispatching
+    // a synthetic pointerdown reaches the handler even on a disabled control, and
+    // iOS Safari is not obliged to behave like Chrome. Letting one through would
+    // retire a healthy recognizer and build another, which is the recognizer churn
+    // this button exists to report on.
+    if (el.start.disabled) return;
     var type = ev ? ev.type : 'none';
     if (type === 'click') {
       if (Date.now() - _startTapAt < 250) return;
@@ -1144,6 +1108,7 @@ function retireCurrent() {
   }
 
   function stopTapped(ev) {
+    if (el.stop.disabled) return;
     var type = ev ? ev.type : 'none';
     if (type === 'click') {
       if (Date.now() - _stopTapAt < 250) return;

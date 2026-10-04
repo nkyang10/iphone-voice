@@ -103,15 +103,24 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   second one on the PC was a duplicate decision, not a safety net. It did mask
   room noise on a phone left face up, which is now a documented trade-off in the
   README rather than something the code hides.
-- The Start button's `disabled` state and label come from **`syncStartButton()` and
-  nowhere else**. It used to be written from four event handlers, which is how they
-  came to disagree. iOS requires a gesture per `start()`, so Start was made
-  permanently re-pressable as the only tap-to-resume affordance; that made the button
-  useless as an indicator, because a button that is always live says nothing. It is now
-  disabled exactly while a recognizer is genuinely live (`recStartedOk && !recEnded &&
-  !recFault`) and re-enabled the moment iOS ends the session or reports a fault. The
-  page's `runHeard` is per-Start; the page-lifetime `stats.heard` was what let the deaf
-  timer below stay switched off for the rest of the session.
+- The Start button's `disabled` state comes from **`syncStartButton()` and nowhere
+  else**, and its label never changes -- it always reads "Start listening". It used to
+  be written from four event handlers, which is how they came to disagree. iOS
+  requires a gesture per `start()`, so Start was made permanently re-pressable as the
+  only tap-to-resume affordance; that made the button useless as an indicator, because
+  a button that is always live says nothing. It is now disabled while a recognizer is
+  live (`rec && recStartedOk && !recEnded && !recFault`), and enabled the moment iOS
+  ends the session or reports an error -- the only times a tap can do anything. The
+  dot and status line above it carry the detail; the button stays the word you already
+  know how to find.
+- **A disabled button is not automatically inert.** `startTapped` and `stopTapped`
+  both bail on `el.start.disabled` / `el.stop.disabled` first. A synthetic
+  `pointerdown` reaches the handler on a disabled control, and iOS Safari is not
+  obliged to suppress events the way Chrome does. Letting one through retires a
+  healthy recognizer and builds another, which is the recognizer churn this button
+  exists to report on.
+- The page's `runHeard` is per-Start; the page-lifetime `stats.heard` was what let the
+  deaf timer below stay switched off for the rest of the session.
 - Text is **streamed, not committed per utterance**, and `Injector.TypeText` is called
   with `appendSpace: false`. The page sends the recognizer's interim results as they
   arrive; the desktop appends each chunk into the focused window. Three consequences
