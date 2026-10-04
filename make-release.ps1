@@ -1,17 +1,25 @@
 # Creates a release folder that someone can unzip and run.
 #
-#   .\make-release.ps1
+#   .\make-release.ps1                 # compile, then assemble the folder
+#   .\make-release.ps1 -UseExistingExe # assemble from desktop\DictationBridge.exe
 #
 # Produces release\DictationBridge-1.0.0\ containing the exe, the page as
 # compiled into it, a quick-start guide, and the certificate to send to a
 # phone. The exe is the whole program: there is no installer and nothing to
 # register, so a user only has to double-click one file.
 
+param(
+    # Assembling the folder from the exe build.ps1 already produced, instead of
+    # compiling a second identical copy. Every check below still runs, so this
+    # cannot ship a folder that a clean make-release.ps1 would have rejected.
+    [switch]$UseExistingExe
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
+if (-not $UseExistingExe -and -not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
 
 $version = '1.0.0'
 $src = Join-Path $root 'desktop\DictationBridge.cs'
@@ -44,21 +52,34 @@ if ($running) {
     Start-Sleep -Milliseconds 800
 }
 
+# Wipe and recreate rather than update in place. This is also what keeps the release
+# folder free of state: running the exe from here creates data\ beside it, and that
+# data\ holds a certificate private key. It has happened -- the folder carried a .pfx
+# and a .cer until this wipe was added -- and a release folder that quietly collects
+# keys is a release folder that eventually gets zipped and handed to someone. Every
+# build starts from nothing, so the guard at the end of this script is checking a
+# folder that really is clean.
 $outDir = Join-Path $root "release\DictationBridge-$version"
 if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
 $exe = Join-Path $outDir 'DictationBridge.exe'
 
-# Compile straight into the release folder with the page embedded.
-& $csc /nologo /target:winexe /platform:x64 /optimize+ `
-    "/out:$exe" `
-    "/resource:$page,DictationBridge.page.html" `
-    /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
-    $src @vendorSrc
-if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
-
-Write-Host "compiled $exe"
+if ($UseExistingExe) {
+    $built = Join-Path $root 'desktop\DictationBridge.exe'
+    if (-not (Test-Path $built)) { throw "no exe to copy; run .\build.ps1 first" }
+    Copy-Item $built $exe -Force
+    Write-Host "copied the exe from build.ps1 into $outDir"
+} else {
+    # Compile straight into the release folder with the page embedded.
+    & $csc /nologo /target:winexe /platform:x64 /optimize+ `
+        "/out:$exe" `
+        "/resource:$page,DictationBridge.page.html" `
+        /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll `
+        $src @vendorSrc
+    if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
+    Write-Host "compiled $exe"
+}
 
 # Smoke-test a first run in a scratch directory, then stop it. This proves the
 # exe starts with nothing beside it and mints its own certificate, which is the
@@ -110,8 +131,29 @@ $text = [System.Text.Encoding]::UTF8.GetString($bytes)
 if ($text -notmatch 'Dictation Bridge') {
     throw "the page does not appear to be embedded in the exe"
 }
+# -UseExistingExe makes this the check that matters most: it is what proves the exe
+# that got copied in is the one this page was compiled into, rather than whatever
+# happened to be on disk.
 if (-not (Select-String -Path $page -Pattern 'webkitSpeechRecognition' -Quiet)) {
     throw "the page has no speech recognition in it"
+}
+# Compare the exe against the page directly. Without this, a stale desktop\DictationBridge.exe
+# copied over a freshly edited web\index.html would assemble a folder whose exe serves
+# an older page, and every check above would pass: the page is embedded, just not this
+# one. This is the same reason AGENTS.md insists on verifying the embedded page really
+# changed after a rebuild.
+if ($UseExistingExe) {
+    # Read the page as UTF-8 bytes, not with Get-Content. Under PowerShell 5.1 that
+    # cmdlet decodes a BOM-less file with the console's ANSI code page, so any
+    # non-ASCII character in the page comes out mangled and the comparison can never
+    # match -- which is a false alarm about the one check that exists to catch a stale
+    # exe. The exe's own bytes are decoded as UTF-8 a few lines up, so both sides of
+    # the comparison have to be decoded the same way.
+    $pageText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($page))
+    if (-not $text.Contains($pageText)) {
+        throw "the exe's embedded page is not web\index.html as it stands now; rebuild with .\build.ps1"
+    }
+    Write-Host "verified the exe's embedded page is the current web\index.html"
 }
 Write-Host "verified the page is embedded"
 
@@ -188,12 +230,15 @@ Safari instead.
 
 ## Use
 
-Start listening on the phone, then talk. Whatever you say is typed straight into the
-window you are working in. Tap Start again to stop.
+Tap Start listening on the phone, then talk. Whatever you say is typed straight into the
+window you are working in, a word at a time as you say it, not after you finish.
 
 | | |
 | --- | --- |
 | Start / stop typing | Start listening, on the phone page |
+| Know if it is working | The Start button is greyed out while it is |
+| Stop typing | Tap Stop on the phone page |
+| Anything else | Right-click the panel, or the tray icon -- same menu |
 | Open the page on the phone | Scan the QR code in the panel |
 | Get the panel back | Click the tray icon, bottom right |
 | Move it | Drag it. It remembers where you left it |
@@ -203,8 +248,13 @@ There is no pause on the PC and no queue. One thing worth knowing: if you leave 
 listening with the phone face up, it will pick up room noise and type it, so leave the
 phone somewhere it cannot hear the room, or tap Stop when you are not using it.
 
-Before first real use, set Settings > Display & Brightness > Auto-Lock to Never on
-the phone. A locked screen stops dictation.
+Words are typed as they are recognised, so a word iOS mishears cannot be taken back once
+it is on screen. iOS usually corrects itself about a second after you say it, which is
+too late to help. One wrong word is not unusual; the rest of the sentence still arrives in
+order.
+
+Before first real use, set Settings > Display & Brightness > Auto-Lock to Never on the
+phone. A locked screen stops dictation.
 
 Cantonese or Chinese: pick it from the dropdown on the phone page. Cantonese is the
 default. If your iPhone rejects a language the page tries the next one and tells you
@@ -220,8 +270,8 @@ addresses the PC had when it was made. The app notices and issues a new one, and
 so in `data\dictation-bridge.log`. Send the new `data\dictation-bridge.cer` to the phone
 and install it again.
 
-Nothing types: check the phone page still says it is listening, and that the panel says
-"listening on the phone".
+Nothing types: check the Start button on the phone page is greyed out, which means the
+microphone is open and the page is sending, and that it says *connected to desktop*.
 
 Nothing appears in the target program: it may be running as administrator, which
 Windows blocks. `data\dictation-bridge.log` will say `SendInput sent 0/44`.

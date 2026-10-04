@@ -1,6 +1,13 @@
-# Builds DictationBridge.exe with the web page embedded as a resource.
+# Builds DictationBridge.exe with the web page embedded as a resource, and puts a copy
+# in release\ where it can be copied to another machine and run.
 #
 #   .\build.ps1
+#
+# The release folder is always refreshed. There used to be a -NoRelease switch, and it
+# was the wrong idea: csc does not produce byte-identical output for identical source,
+# so skipping it leaves a genuinely older binary sitting next to the new one with
+# nothing on screen saying which is which. That is the stale-exe trap this arrangement
+# exists to remove, reintroduced through a convenience flag.
 #
 # The page is embedded so the exe is a single self-contained file. The desktop
 # prefers the embedded copy, which means a file dropped next to the exe cannot
@@ -59,3 +66,15 @@ $size = [math]::Round((Get-Item $exe).Length / 1KB, 1)
 Write-Host "built $exe  ($size KB)"
 Write-Host "embedded: DictationBridge.page.html  ($([math]::Round((Get-Item $page).Length / 1KB, 1)) KB)"
 Write-Host "vendored: QRCoder encoder  ($($vendorSrc.Count) files, compiled in)"
+
+# Refresh release\DictationBridge-1.0.0 from what was just built.
+#
+# The exe that gets tested is the one that gets released. Having two copies is how a
+# bug gets fixed in one and verified against the other -- the release folder held a
+# 137 KB exe while the working build was 156 KB, which is exactly a stale-binary
+# report waiting to happen. One build, one artefact, two locations.
+#
+# make-release.ps1 owns the folder's contents, its README and its licence checks, and
+# it wipes the folder first so state from a test run -- including the certificate
+# private key the app writes beside the exe -- can never survive into a package.
+& (Join-Path $root 'make-release.ps1') -UseExistingExe

@@ -22,6 +22,14 @@ Edit `web/index.html`, rebuild, and copy the exe to wherever you are testing. Th
 stops a running copy of the app first, because Windows will not let you overwrite a file
 that is executing.
 
+**`.\build.ps1` always refreshes `release\DictationBridge-1.0.0\`**, so the exe you copy to
+another machine is the same one you just built — byte for byte, worth checking with
+`Get-FileHash` after a build. It does this by calling `make-release.ps1 -UseExistingExe`,
+which assembles the folder from the built exe without compiling again but still runs every
+check, including that the exe's embedded page is the `web\index.html` that exists right now.
+It also wipes the folder first, so a `data\` directory left behind by running the app from
+there — which contains a certificate private key — can never survive into a package.
+
 ## Read this first
 
 **[AGENTS.md](AGENTS.md)** documents the conventions and the traps: why the recognizer must
@@ -77,10 +85,14 @@ in the binary, which catches a release built without the vendored source.
 ## Release
 
 ```powershell
-.\make-release.ps1
+.\build.ps1                 # what you normally want: builds, then refreshes the folder
+.\make-release.ps1          # compile again from scratch, into the folder
+.\make-release.ps1 -UseExistingExe   # assemble from desktop\DictationBridge.exe
 ```
 
-Produces `release\DictationBridge-<version>\` containing four files:
+`build.ps1` already does the last one, so running `make-release.ps1` by hand is only for
+inspecting or rebuilding the folder without touching `desktop\`. Both produce
+`release\DictationBridge-<version>\` containing four files:
 
 | | |
 | --- | --- |

@@ -31,6 +31,22 @@ That is the only supported build command. It compiles with the `csc.exe` shipped
 `Microsoft.NET\Framework64\v4.0.30319` and embeds `web/index.html` as a resource named
 `DictationBridge.page.html`.
 
+**`build.ps1` always refreshes `release\DictationBridge-1.0.0\`.** The exe that gets
+tested has to be the exe that gets released: the release folder was holding a 137 KB exe
+while the working build was 156 KB, which is a stale-binary report waiting to happen. It
+calls `make-release.ps1 -UseExistingExe`, which owns the folder's contents and copies
+rather than recompiling. `csc` does not emit byte-identical output for identical source,
+so there is no `-NoRelease` escape hatch either: skipping the copy would leave an older
+binary beside the new one with nothing on screen saying which is which. Verify the two
+copies hash the same after a build.
+
+**`make-release.ps1` wipes the release folder before rebuilding it, and that is load-
+bearing.** Running the exe from there creates `data\` beside it, and `data\` holds a
+`.pfx` — the certificate private key. The folder did carry one. A release folder that
+quietly accumulates keys is a folder that eventually gets zipped and handed to someone,
+so every build starts from nothing and the leak guard at the end is checking a folder
+that really is clean.
+
 Do not invoke `csc.exe` by hand. Without the `/resource` flag you get an exe that
 silently loses the embedded page and falls back to reading a file from disk.
 
