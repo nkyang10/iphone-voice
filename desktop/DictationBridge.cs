@@ -15,7 +15,6 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
-using System.Web.Script.Serialization;
 
 namespace DictationBridge
 {
@@ -2184,7 +2183,7 @@ namespace DictationBridge
             catch (Exception) { }
         }
 
-private void BuildUi(Control host)
+        private void BuildUi(Control host)
         {
             _body = new Panel
             {
@@ -2313,7 +2312,7 @@ private void BuildUi(Control host)
             urlCard.Controls.Add(urlBg);
             urlBg.SendToBack();
 
-// Last typed utterance, shown as a quote with an accent bar.
+            // Last typed utterance, shown as a quote with an accent bar.
             var lastRow = new Panel
             {
                 Dock = DockStyle.Top,

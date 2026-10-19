@@ -210,7 +210,7 @@ button {
     return 'fell back ' + langIndex + ' step' + (langIndex === 1 ? '' : 's');
   }
 
-// The one place that decides what the Start button looks like and whether it
+  // The one place that decides what the Start button looks like and whether it
   // works.
   //
   // It used to be written wherever a recognizer event happened, which is how four
@@ -351,7 +351,6 @@ button {
         outbox.shift();
         flushing = false;
         stats.sent++;
-        stats.heard++;
         pushLocal(chunk);
         updatePending();
         flushOutbox();
@@ -585,24 +584,6 @@ button {
     flushHeld();
   }
 
-  // Polls the desktop and drains anything queued while it was unreachable.
-  function pollStatus() {
-    return post('/status').then(function (s) {
-      el.wsDot.className = 'dot ok';
-      el.wsLabel.textContent = 'connected to desktop';
-      // There is no armed flag to read any more: the desktop types whatever
-      // arrives, and this page's Start button is the only on/off switch.
-      el.typingState.textContent = 'straight into the focused window';
-      serverTyped = s.typed;
-      flushOutbox();
-    }).catch(function () {
-      el.wsDot.className = 'dot bad';
-      el.wsLabel.textContent = 'desktop not reachable';
-      el.typingState.textContent = 'unknown';
-    });
-  }
-
-  var serverTyped = 0;
 
   // ---- local transcript ------------------------------------------------------
   // One line per chunk, recorded when the desktop has confirmed it, so this list is
@@ -718,7 +699,7 @@ button {
     stats.langTries++;
     setRec('warn', 'trying ' + activeLang);
     warn('iOS does not accept ' + rejected + ' for recognition. Trying ' + activeLang + '.');
-    rearm("lang-rejected")
+    rearm('lang-rejected');
     return activeLang;
   }
 
@@ -915,6 +896,7 @@ button {
       showTail(ev.results);
       if (!full) return;
       runHeard++;
+      stats.heard++;
       streamFull(full, lastIsFinal(ev.results));
     };
 
@@ -988,7 +970,7 @@ button {
     clearTimeout(restartTimer);
     restartTimer = setTimeout(function () {
       if (!wantRun) return;
-    rearm("session-ended")
+      rearm('session-ended');
     }, RESTART_MS);
   }
 
@@ -1041,7 +1023,7 @@ button {
       note('giveup', 'wedged ' + wedgeRestarts + ' times in a row; handing control back');
       return;
     }
-    rearm("watchdog-stall")
+    rearm('watchdog-stall');
   }, 2000);
 
   // Silence after a successful start, which is a different failure and was not
@@ -1106,10 +1088,11 @@ button {
   // Without that, abort() fires onend, which called scheduleRestart, which
   // aborted again: every cycle created two recognizers until start() began
   // throwing and recognition stopped permanently after any idle period.
-  // Detach the current recognizer and stop it for good. The retire flag is what
-// stops the instance's own onend from scheduling yet another restart; it must be
-// set before abort(), never after.
-function retireCurrent() {
+  //
+  // retireCurrent() detaches the current recognizer and stops it for good. The
+  // retire flag is what stops the instance's own onend from scheduling yet another
+  // restart; it must be set before abort(), never after.
+  function retireCurrent() {
     // Anything still held back belongs to the recognizer being retired, so it goes
     // out before the streaming state is reset. Otherwise the last ten characters of
     // every sentence would be dropped at each of the hundreds of re-arms a long
@@ -1129,7 +1112,7 @@ function retireCurrent() {
 
   function rearm(reason) {
     clearTimeout(restartTimer);
-    note('rearm', reason || 'unspecified' + ' gesture=' + inGesture());
+    note('rearm', (reason || 'unspecified') + ' gesture=' + inGesture());
     retireCurrent();
 
     rec = newRecognizer();
@@ -1208,7 +1191,7 @@ function retireCurrent() {
       warn('The browser refused to start dictation: ' + e.message +
            ' — tap Start again, and if it keeps failing send a diagnostics report.');
       recordAttempt({ at: at, via: how || '?', outcome: 'start() threw: ' + e.name + ': ' + e.message });
-      throw e;
+      note('startThrew', e.name + ': ' + e.message);
     }
   }
 
@@ -1293,15 +1276,16 @@ function retireCurrent() {
 
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'visible' && wantRun && (!rec || Date.now() - lastEvent > STALL_MS)) {
-      // retireCurrent(), not a bare abort(). Aborting without retiring leaves the old
+      // rearm(), not a bare abort(). Aborting without retiring leaves the old
       // instance free to deliver its onend, and that onend then sets recEnded on a
       // page whose recognizer is the *new* one -- which lights the Start button while
       // dictation is working, and schedules a second restart on top of this one.
-      retireCurrent();
-      rec = newRecognizer();
-      stats.sessions++;
-      syncStartButton();
-      try { rec.start(); } catch (e) { scheduleRestart(); }
+      //
+      // rearm() also restarts the stall clock. This path used to build the
+      // recognizer by hand and leave lastEvent where it was -- by definition more
+      // than STALL_MS ago, or it would not have come here -- so the watchdog took
+      // the brand-new recognizer for a wedged one on its very next tick.
+      rearm('page-visible');
     }
   });
 
@@ -1431,7 +1415,7 @@ function retireCurrent() {
       try { localStorage.setItem('dictation-lang', sel.value); } catch (e) {}
       if (wantRun) {
         beginLangChain();
-    rearm("lang-change")
+        rearm('lang-change');
       }
     });
   })();
