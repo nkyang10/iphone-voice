@@ -29,10 +29,12 @@ own copy on that first run, so everyone gets one that matches their own machine.
 **2. On the phone**
 
 Point the camera at the QR code on the panel and tap the link that appears. That opens
+the page **and pairs the phone with this PC**: the code carries a pairing key as well as
 the address, which looks like `https://192.168.1.162:17123/`.
 
-If your camera won't read the code, the same address is written beside it — type it into
-Safari instead.
+The address is written beside the code too, but typing it opens the page without pairing
+it, and the page will say so. If your camera won't read the code, choose **Copy pairing
+link** on the panel and send that link to the phone instead.
 
 The phone will ask you to install a certificate. Tap through it, then come back. This
 happens **once**, and the detailed steps are in
@@ -107,7 +109,8 @@ the rewrite, so it is never typed twice, and the sentence continues in order.
 | --- | --- |
 | Start / stop typing | **Start listening** on the phone page |
 | See if it is really hearing you | The Start button: **greyed out** means the microphone is open |
-| Open the page on the phone | Scan the QR code in the panel |
+| Open the page on the phone | Scan the QR code in the panel. It pairs the phone too |
+| Unpair every phone | Right-click the panel, **Reset phone pairing...**, then scan the new code |
 | See the panel again | Click the tray icon |
 | Anything the tray icon can do | Right-click anywhere on the panel — same menu |
 | Move the panel | Drag it. It remembers where you left it |
@@ -139,8 +142,9 @@ The panel, collapsed to a single strip. The dot breathes while the phone is in t
   <img src="docs/panel-collapsed.png" width="320" alt="Collapsed panel">
 </p>
 
-Expand it with the **+** for the QR code, the address to type if the camera will not read
-it, and what was typed most recently, filling in as you speak.
+Expand it with the **+** for the QR code that pairs the phone, the address it points to,
+and what was typed most recently, filling in as you speak. Until a phone has paired, the
+panel opens expanded on the QR code, and it folds itself away once one has.
 
 ## Files it creates
 
@@ -158,6 +162,7 @@ Two more are there for when something goes wrong:
 | `dictation-bridge.log` | Everything the app did, in order. **Send this with any bug report.** |
 | `last-run.txt` | Says whether the last run finished cleanly. Still reading `running` means it was killed or crashed. |
 | `crash.txt` | Only exists if something threw. The full error and stack trace. |
+| `pairing-key.txt` | The key that pairs your phone. Anyone who has it can type on this PC, so **never send it** with a bug report. Delete it, or use **Reset phone pairing...**, to unpair every phone. |
 
 Right-click the panel, or the tray icon, and choose **Show the log file** to open the log
 in Explorer with
@@ -169,9 +174,16 @@ Your speech is transcribed by **Apple**, because that's how Safari's dictation w
 text is sent to your own PC over your own network. Nothing is sent to us, or anywhere
 else.
 
-One honest caveat: anyone on the same network who learns the session token can type into
-your focused window. On a home network that's fine. On shared or public WiFi, be aware of
-it.
+Only a paired phone can type. The pairing key travels inside the QR code, after the `#`,
+the part of an address a browser never sends anywhere, and the PC never hands it out:
+another device on the same WiFi that opens the address gets the page, but every request
+it makes is refused. The log never contains the key, and it no longer contains what you
+said either, only how many characters were typed.
+
+One honest caveat: anyone who can see the QR code, or who has the phone or the PC's
+`data\` folder, has the key. On a shared or public network, keep the panel collapsed
+while other people are around, and use **Reset phone pairing...** to cut off a phone you
+no longer trust.
 
 ## Known limits
 
@@ -208,8 +220,8 @@ appear broken without it:
 4. **Settings > General > About > Certificate Trust Settings**
 5. Switch on **Dictation Bridge**
 
-**Open the page.** Scan the QR code on the panel, or type in the address written beside
-it.
+**Open the page.** Scan the QR code on the panel. The code carries the pairing key, so scan
+it rather than typing the address.
 
 ### It keeps working
 
@@ -230,6 +242,12 @@ send it. The log is timestamped and each run is fenced with `=== run N starting 
 can see exactly how far it got. If `data\last-run.txt` still says `state: running` it was
 killed or died somewhere nothing could catch, and the log will say so on the next launch. If
 `data\crash.txt` exists, send that too; it's short and holds the full stack trace.
+
+**The page says "not paired with this PC".**
+The page was opened without the pairing key, usually by typing the address, or the PC's
+pairing was reset since this phone scanned it. Scan the QR code on the panel again; the
+panel says *phone not paired: scan the QR code* while a phone is being refused. Whatever
+you said in the meantime waits on the phone and is typed once it pairs.
 
 **A red box appeared when it started.**
 That is the app telling you it cannot go on, rather than vanishing. The message repeats what

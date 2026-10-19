@@ -124,7 +124,9 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   `BuildUi`, which the constructor calls, but C# requires the assignment to be
   inside a constructor body.
 - There is no armed flag, no buffer and no hotkey. `Bridge.OnText` types
-  unconditionally, and `/status` carries `typed`, `received`, `phone` and `last` only.
+  unconditionally, and `/status` carries `typed`, `received` and `phone` only. It
+  used to carry `last`, the tail of the typed text; nothing read it, and it put what
+  was said on the wire twice a second.
   Do not reintroduce a desktop gate: the phone's Start button is the switch, and a
   second one on the PC was a duplicate decision, not a safety net. It did mask
   room noise on a phone left face up, which is now a documented trade-off in the
@@ -222,9 +224,9 @@ deliberately no keep-awake audio trick for the same reason; use Auto-Lock to Nev
 recognizer goes deaf while TTS plays, and a second audio track gets muted within a
 second or two. No read-back confirmations, no level meter.
 
-**The socket port is the page's port.** The server serves the page, `/status`, `/speak`,
-and `/diag` on one port, and the page reaches every endpoint with a relative path, so it
-follows whichever port the app ended up on. Do not reintroduce a second TLS listener: iOS
+**The socket port is the page's port.** The server serves the page, `/config`, `/status`,
+`/speak` and `/diag` on one port, and the page reaches every endpoint with a relative path,
+so it follows whichever port the app ended up on. Do not reintroduce a second TLS listener: iOS
 accepted TLS on the HTTP port while rejecting the identical certificate on a second port.
 
 **Do not switch back to WebSocket.** It was removed deliberately. Chrome takes the
@@ -330,30 +332,56 @@ and installing that root on a user's PC is not this app's decision to make. iOS 
 .\build.ps1
 .\desktop\DictationBridge.exe --port 8099
 
-# do the endpoints behave
+# do the endpoints behave: /config answers anyone, /status wants the key
 node -e "const https=require('https');https.get({host:'127.0.0.1',port:8099,path:'/config',rejectUnauthorized:false},r=>{let b='';r.on('data',d=>b+=d);r.on('end',()=>console.log(r.statusCode,b.trim()))})"
+$key = (Select-String -Path .\desktop\data\pairing-key.txt -Pattern '^key: (\w+)').Matches[0].Groups[1].Value
+node -e "const https=require('https');https.get({host:'127.0.0.1',port:8099,path:'/status',headers:{'X-Dictation-Key':process.argv[1]},rejectUnauthorized:false},r=>{let b='';r.on('data',d=>b+=d);r.on('end',()=>console.log(r.statusCode,b.trim()))})" $key
 ```
+
+Expect `200 {"version":"..."}`, then `200 {"typed":0,...}`. Without the header `/status` must
+answer `401 {"error":"not-paired"}`.
 
 `--ignore-certificate-errors` is required because the certificate is self-signed.
 
 ## Security posture
 
-Treat this as a personal tool on a trusted LAN. The token in `/config` is the only
-barrier, and it travels over TLS to whoever loads the page. Do not describe it as secure,
-and do not add features that assume it is.
+Treat this as a personal tool on a trusted LAN. The barrier is the **pairing key**: 96
+random bits in `data\pairing-key.txt`, carried to the phone in the QR code after the `#`,
+which a browser never sends to a server. The page stores it and sends it back in an
+`X-Dictation-Key` header on `/status`, `/speak` and `/diag`; anything without it gets
+`401`. It replaced a session token that `/config` handed to whoever asked, which made it a
+formality. Still do not describe the app as secure: anyone who sees the panel, the phone or
+the file has the key, and the certificate is self-signed.
+
+- **Never serve the key, and never log it.** `/config` carries the page version and nothing
+  else. "Copy pairing link" logs that it copied, not what. A key in the log would be posted
+  in the first bug report.
+- **The extra checks are belt and braces, not the barrier.** `Servers.Admit` also refuses a
+  foreign `Origin` or a `Sec-Fetch-Site` of `cross-site`/`same-site` (`403`), and a POST
+  that is not `application/json` (`415`), so a page in some other tab cannot even try. There
+  is no `Access-Control-Allow-Origin` header; it used to be `*`, which let any site read
+  `/status`. Do not add one back.
+- **Refusals are rate limited per address, the key never is.** Thirty refusals inside a
+  minute turn further refusals into `429` for two minutes, so a confused device cannot fill
+  the log. A request with the right key is admitted even then, so a phone is never locked
+  out by refusals from its own address, such as an old tab left open after a reset.
+- **"Reset phone pairing..." is the only way to revoke a phone.** It makes a new key, so
+  every phone has to scan the new code. Deleting the file does the same at the next start.
 
 - Everything the app generates goes in `data\` beside the exe, via `Store.File()`.
   Never write a file beside the exe directly. The point is that the exe stays a
   single untouched file and all disposable state is deletable in one go.
 - `dictation-bridge.pfx` holds the certificate private key; `dictation-bridge.cer`
   is its public half. Both are generated at runtime, so neither belongs in the
-  repository, and the `.pfx` must never be committed. `web/index.html` is the only
+  repository, and the `.pfx` must never be committed. `pairing-key.txt` is the same
+  kind of secret and gets the same treatment. `web/index.html` is the only
   source of truth for the page; `build.ps1` embeds it.
 - **The release folder contains no certificate at all**, only the exe, its README and
   the licence files. Each recipient mints their own on first run. This is not an oversight:
   a certificate is machine-specific, and a `.pfx` handed out with a download is a
-  private key in public. `make-release.ps1` throws if any `.pfx` or `.cer` reaches
-  `release\`, so keep it that way rather than adding one back for convenience.
+  private key in public. `make-release.ps1` throws if any `.pfx`, `.cer` or
+  `pairing-key.txt` reaches `release\`, so keep it that way rather than adding one back
+  for convenience.
 - **The licence files ship with the exe.** `LICENSE` and `THIRD_PARTY_NOTICES.txt`
   are part of the release, not repository decoration. QRCoder is MIT, and MIT permits
   redistribution only if the notice travels with the copies; the compiled exe counts.

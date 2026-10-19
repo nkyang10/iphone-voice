@@ -47,9 +47,12 @@ things:
 .\build.ps1
 .\desktop\DictationBridge.exe --port 8099
 
-# do the endpoints behave
+# do the endpoints behave: /config answers anyone and carries only the page version
 node -e "const https=require('https');https.get({host:'127.0.0.1',port:8099,path:'/config',rejectUnauthorized:false},r=>{let b='';r.on('data',d=>b+=d);r.on('end',()=>console.log(r.statusCode,b.trim()))})"
 ```
+
+`/status`, `/speak` and `/diag` want the pairing key from `desktop\data\pairing-key.txt` in
+an `X-Dictation-Key` header and answer `401` without it. AGENTS.md has the full check.
 
 For the web page, drive real Chrome over the DevTools Protocol:
 
@@ -176,12 +179,14 @@ default.
 
 ## Security
 
-Treat this as a personal tool on a trusted LAN. The token in `/config` is the only
-barrier, and it travels over TLS to whoever loads the page. Do not describe it as secure,
-and do not add features that assume it is.
+Treat this as a personal tool on a trusted LAN. The barrier is the pairing key, which
+reaches the phone only through the QR code and is never served or logged; AGENTS.md
+explains the rest. Do not describe the app as secure, and do not add features that assume
+it is.
 
-`data/dictation-bridge.pfx` holds the certificate private key and is gitignored. Never
-commit it, and never commit anything from `data/`.
+`data/dictation-bridge.pfx` holds the certificate private key and `data/pairing-key.txt`
+the pairing key. Both are gitignored. Never commit them, and never commit anything from
+`data/`.
 
 Before committing, check for secrets in the staged blobs rather than the working tree:
-the phone token, the Serper key used for research, and any certificate.
+the pairing key, the Serper key used for research, and any certificate.

@@ -168,8 +168,9 @@ Write-Host "verified the QR encoder is compiled in"
 
 # Nothing sensitive may reach the release folder. A .pfx is the certificate
 # private key: publishing one lets anyone impersonate the certificate, and this
-# package is meant to be downloadable.
-$leaked = @(Get-ChildItem $outDir -Recurse -File -Include *.pfx, *.cer -ErrorAction SilentlyContinue)
+# package is meant to be downloadable. pairing-key.txt is the same kind of
+# secret: whoever has it can type on the PC that made it.
+$leaked = @(Get-ChildItem $outDir -Recurse -File -Include *.pfx, *.cer, pairing-key.txt -ErrorAction SilentlyContinue)
 if ($leaked.Count -gt 0) {
     throw "the release must not contain keys or certificates: $($leaked.Name -join ', ')"
 }
@@ -222,9 +223,11 @@ is one more step:
 5. Switch on Dictation Bridge
 
 **4. Open the page.** The panel shows a QR code. Point the phone's camera at it and
-tap the notification that appears. If your camera will not read it, the address is
-written beside the code, `https://192.168.1.162:17123/`, and you can type that into
-Safari instead.
+tap the notification that appears. That opens the page and pairs the phone with this
+PC: the code carries a pairing key as well as the address. The address is written
+beside the code, `https://192.168.1.162:17123/`, but typing it opens the page without
+pairing it. If your camera will not read the code, use Copy pairing link on the panel
+and send the link to the phone.
 
 **5. Tap Start listening**, and allow the microphone.
 
@@ -239,7 +242,8 @@ window you are working in, a word at a time as you say it, not after you finish.
 | Know if it is working | The Start button is greyed out while it is |
 | Stop typing | Tap Stop on the phone page |
 | Anything else | Right-click the panel, or the tray icon -- same menu |
-| Open the page on the phone | Scan the QR code in the panel |
+| Open the page on the phone | Scan the QR code in the panel. It pairs the phone too |
+| Unpair every phone | Right-click the panel, Reset phone pairing..., scan the new code |
 | Get the panel back | Click the tray icon, bottom right |
 | Move it | Drag it. It remembers where you left it |
 | Port already in use | Run `DictationBridge.exe --port 8099` |
@@ -264,6 +268,10 @@ which it settled on.
 
 "No speech recognition" on the page: the certificate is not trusted. Do step 3, which
 is a different place from step 2.
+
+"Not paired with this PC" on the page: it was opened without the pairing key, usually
+by typing the address, or the pairing was reset since. Scan the QR code again. What you
+said meanwhile waits on the phone and is typed once it pairs.
 
 Your address changed and dictation stopped working: the certificate only covers the
 addresses the PC had when it was made. The app notices and issues a new one, and says
@@ -290,8 +298,11 @@ Still stuck: on the phone page tap Send to desktop, then read
 Your speech is transcribed by Apple, because that is how Safari's dictation works.
 The text goes to your own computer over your own network. Nothing is sent elsewhere.
 
-Anyone on the same network who learns the session token can type into your focused
-window. Fine on a home network, worth knowing on shared WiFi.
+Only a paired phone can type. The pairing key travels inside the QR code and the PC
+never hands it out, so another device on the same WiFi gets the page but nothing it
+sends is typed. The log holds neither the key nor what you said. Anyone who can see the
+QR code, or has data\pairing-key.txt, has the key: never send that file with a bug
+report, and use Reset phone pairing... to cut off a phone you no longer trust.
 
 ## Limits
 

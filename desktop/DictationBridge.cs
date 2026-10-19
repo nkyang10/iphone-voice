@@ -125,6 +125,176 @@ namespace DictationBridge
         }
     }
 
+    // The one secret between this PC and the phone.
+    //
+    // It used to be a session token that the page fetched from /config. Anything
+    // else on the Wi-Fi could fetch it just as easily, so all it proved was that
+    // a request came from someone who could reach the port -- and anyone who
+    // could reach the port could type into whatever window had focus.
+    //
+    // The key now travels in the QR code, after the '#'. A browser never sends
+    // that part of an address to any server, so the key exists on the panel the
+    // user is looking at, on the phone that scanned it, and nowhere else. The
+    // page sends it back as a header on every request, and the server never
+    // hands it out.
+    //
+    // It lives on disk, so the phone stays paired across restarts and network
+    // changes; a key that changed on every launch would mean rescanning every
+    // morning. "Reset phone pairing" throws it away. It is never written to the
+    // log.
+    internal static class Pairing
+    {
+        private const string FileName = "pairing-key.txt";
+        // 96 random bits, as 24 hex digits. Far beyond guessing over a LAN, and
+        // short enough that the QR code only grows by one size step.
+        private const int KeyBytes = 12;
+        private static readonly object Gate = new object();
+        private static string _key;
+        private static bool _used;
+
+        public static string Key
+        {
+            get { lock (Gate) { Load(); return _key; } }
+        }
+
+        // Whether any phone has ever made a request with the current key. Lets
+        // the panel open on the QR code until the first phone is paired.
+        public static bool Used
+        {
+            get { lock (Gate) { Load(); return _used; } }
+        }
+
+        public static string Link(string baseUrl)
+        {
+            return baseUrl + "#k=" + Key;
+        }
+
+        // Constant time, so how quickly a guess is refused says nothing about
+        // how close it was.
+        public static bool Matches(string supplied)
+        {
+            if (string.IsNullOrEmpty(supplied)) return false;
+            string key = Key;
+            string candidate = supplied.Trim().ToLowerInvariant();
+            if (candidate.Length != key.Length) return false;
+            int diff = 0;
+            for (int i = 0; i < key.Length; i++) diff |= key[i] ^ candidate[i];
+            return diff == 0;
+        }
+
+        // Called on every accepted request; only the first one does any work.
+        public static void MarkUsed()
+        {
+            lock (Gate)
+            {
+                Load();
+                if (_used) return;
+                _used = true;
+                Save();
+            }
+            Log.Write("phone paired: the first request with the current key arrived");
+        }
+
+        // Every phone that scanned the old code stops working until it scans the
+        // new one.
+        public static void Reset()
+        {
+            lock (Gate)
+            {
+                _key = NewKey();
+                _used = false;
+                Save();
+            }
+            Log.Write("pairing reset: the old key no longer works, rescan the QR code");
+        }
+
+        // Reads the file once; later calls are free. A missing or damaged file
+        // gets a fresh key, which unpairs any phone, but that is the only safe
+        // reading of a key that cannot be trusted.
+        private static void Load()
+        {
+            if (_key != null) return;
+            string path = Store.File(FileName);
+            try
+            {
+                if (System.IO.File.Exists(path))
+                {
+                    foreach (string raw in System.IO.File.ReadAllLines(path))
+                    {
+                        string line = raw.Trim();
+                        if (line.StartsWith("key:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string value = line.Substring(4).Trim().ToLowerInvariant();
+                            if (IsKey(value)) _key = value;
+                        }
+                        else if (line.StartsWith("paired:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _used = true;
+                        }
+                    }
+                    if (_key == null) Log.Write("WARN: " + FileName + " held no usable key, so a new one was made");
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Write("WARN: could not read " + FileName + ": " + e.Message);
+            }
+            if (_key == null)
+            {
+                _key = NewKey();
+                _used = false;
+                Save();
+            }
+        }
+
+        // A failed save is survivable: the key still works for this run, and
+        // the phone has to rescan after the next start. Said once, in the log.
+        private static void Save()
+        {
+            var text = new StringBuilder();
+            text.Append("# Dictation Bridge pairing key. Anyone who has it can type on this PC.\r\n");
+            text.Append("# Delete this file, or use \"Reset phone pairing\", to unpair every phone.\r\n");
+            text.Append("key: ").Append(_key).Append("\r\n");
+            if (_used)
+            {
+                text.Append("paired: ").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss",
+                    System.Globalization.CultureInfo.InvariantCulture)).Append("\r\n");
+            }
+            try
+            {
+                System.IO.File.WriteAllText(Store.File(FileName), text.ToString(), Encoding.ASCII);
+            }
+            catch (Exception e)
+            {
+                Log.Write("WARN: could not save " + FileName + " (the phone will need to rescan " +
+                          "after a restart): " + e.Message);
+            }
+        }
+
+        private static string NewKey()
+        {
+            var bytes = new byte[KeyBytes];
+            using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(bytes);
+            }
+            var sb = new StringBuilder(KeyBytes * 2);
+            foreach (byte b in bytes) sb.Append(b.ToString("x2"));
+            return sb.ToString();
+        }
+
+        private static bool IsKey(string value)
+        {
+            if (value == null || value.Length != KeyBytes * 2) return false;
+            foreach (char c in value)
+            {
+                bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                if (!hex) return false;
+            }
+            return true;
+        }
+    }
+
     internal static class Certs
     {
         public const string PfxPassword = "dictation-bridge";
@@ -896,7 +1066,10 @@ namespace DictationBridge
             }
             else
             {
-                Log.Write("typed: " + Bridge.Describe(Preview(text)));
+                // A count, not the words. The log is the file people are asked to
+                // attach to bug reports, and it used to carry the start of every
+                // sentence they had dictated.
+                Log.Quiet("typed " + text.Length + " char" + (text.Length == 1 ? "" : "s"));
             }
         }
 
@@ -923,12 +1096,6 @@ namespace DictationBridge
             input.U.ki.dwExtraInfo = UIntPtr.Zero;
             return input;
         }
-
-        private static string Preview(string s)
-        {
-            string flat = s.Replace("\n", " ").Replace("\r", " ");
-            return flat.Length <= 60 ? flat : flat.Substring(0, 60) + "...";
-        }
     }
 
     internal static class ProcessIdHelper
@@ -938,18 +1105,13 @@ namespace DictationBridge
 
     internal sealed class Bridge
     {
-        private readonly string _token;
         private readonly object _gate = new object();
         private int _typedCount;
         private string _lastTyped = "";
         private string _recentTyped = "";
         private DateTime _lastSeen = DateTime.MinValue;
+        private DateTime _lastRefused = DateTime.MinValue;
         private long _received;
-
-        public Bridge(string token)
-        {
-            _token = token;
-        }
 
         // With plain HTTP there is no persistent connection, so "connected" means
         // the phone polled recently.
@@ -977,9 +1139,18 @@ namespace DictationBridge
             get { lock (_gate) { return (int)_received; } }
         }
 
-        public bool CheckToken(string token)
+        // Something asked without the right pairing key in the last half
+        // minute. Usually a phone that was paired before "Reset phone pairing",
+        // which is exactly when the panel should say to scan the code again.
+        public bool RecentlyRefused
         {
-            return string.Equals(token, _token, StringComparison.Ordinal);
+            get { lock (_gate) { return (DateTime.UtcNow - _lastRefused).TotalSeconds < 30; } }
+        }
+
+        public void Refused()
+        {
+            lock (_gate) { _lastRefused = DateTime.UtcNow; }
+            RaiseChanged();
         }
 
         public event Action Changed;
@@ -1051,41 +1222,23 @@ namespace DictationBridge
             get { lock (_gate) { return _lastTyped; } }
         }
 
-        // Escapes non-ASCII so the log is readable in any console codepage, while
-        // keeping the exact text in what gets typed.
-        public static string Describe(string text)
-        {
-            var sb = new StringBuilder();
-            foreach (char c in text)
-            {
-                if (c < 0x80) sb.Append(c);
-                else sb.Append("\\u").Append(((int)c).ToString("x4"));
-            }
-            return sb.ToString();
-        }
-
+        // Counts only. The typed text itself used to ride along as "last", which
+        // put the tail of everything said on the wire twice a second for a page
+        // that never read it.
         public string StatusJson()
         {
             int typed;
-            string last;
             bool present;
             int received;
             lock (_gate)
             {
                 typed = _typedCount;
-                last = _recentTyped;
                 received = (int)_received;
                 present = (DateTime.UtcNow - _lastSeen).TotalSeconds < 10;
             }
             return "{\"typed\":" + typed +
                    ",\"received\":" + received +
-                   ",\"phone\":" + (present ? "true" : "false") +
-                   ",\"last\":" + Json(last) + "}";
-        }
-
-        public void CountReceived()
-        {
-            lock (_gate) { _received++; }
+                   ",\"phone\":" + (present ? "true" : "false") + "}";
         }
 
         // Minimal JSON string escaping for the values we echo back.
@@ -1128,8 +1281,7 @@ namespace DictationBridge
         // meant a second TLS listener, and iOS failed that handshake while
         // accepting the identical certificate on the HTTP port. Sharing the
         // port keeps a single, proven TLS path.
-        public static int StartAll(Bridge bridge, string token, int port, byte[] pfx,
-            bool allowFallback)
+        public static int StartAll(Bridge bridge, int port, byte[] pfx, bool allowFallback)
         {
             // One certificate for the life of the process. Per-connection imports
             // made things worse, not better.
@@ -1221,7 +1373,7 @@ namespace DictationBridge
                               candidate + " instead");
                 }
                 Log.Write("listener bound to port " + candidate);
-                Accept(listener, bridge, token, cert, candidate);
+                Accept(listener, bridge, cert);
                 return candidate;
             }
 
@@ -1317,8 +1469,7 @@ namespace DictationBridge
             return true;
         }
 
-        private static void Accept(TcpListener listener, Bridge bridge, string token,
-            X509Certificate2 cert, int port)
+        private static void Accept(TcpListener listener, Bridge bridge, X509Certificate2 cert)
         {
             new Thread(() =>
             {
@@ -1338,25 +1489,85 @@ namespace DictationBridge
                         }
                         break;
                     }
-                    new Thread(() => Handle(client, bridge, token, null, cert, port))
+                    new Thread(() => Handle(client, bridge, cert))
                     { IsBackground = true }.Start();
                 }
             }) { IsBackground = true }.Start();
         }
 
-        private static void Handle(TcpClient client, Bridge bridge, string token,
-            string unusedPath, X509Certificate2 cert, int servePort)
+        // The page sends the pairing key in this header on every request. A
+        // header rather than a body field: a GET has no body, and a browser will
+        // not attach a custom header to a request from another site without first
+        // asking this server, which never says yes.
+        private const string KeyHeader = "X-Dictation-Key";
+        // Safari's request heads run to about a kilobyte.
+        private const int MaxHead = 16384;
+        private const int MaxBody = 65536;
+
+        private sealed class Request
         {
+            public string Method = "";
+            public string Path = "/";
+            public string Remote = "";
+            public byte[] Body = new byte[0];
+            public readonly Dictionary<string, string> Headers =
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            public string Header(string name)
+            {
+                string value;
+                return Headers.TryGetValue(name, out value) ? value : null;
+            }
+
+            public string BodyText()
+            {
+                return Encoding.UTF8.GetString(Body);
+            }
+        }
+
+        private sealed class Reply
+        {
+            public int Status = 200;
+            public string Type = "application/json";
+            public string Body = "";
+            // Extra header lines, each ending in \r\n.
+            public string Headers = "";
+        }
+
+        private static Reply Json(int status, string body)
+        {
+            var reply = new Reply();
+            reply.Status = status;
+            reply.Body = body;
+            return reply;
+        }
+
+        // A short code the page can act on, and nothing a stranger could learn
+        // from.
+        private static Reply Error(int status, string code)
+        {
+            return Json(status, "{\"error\":" + Bridge.Json(code) + "}");
+        }
+
+        private static Reply NotAllowed(string allow)
+        {
+            Reply reply = Error(405, "method");
+            reply.Headers = "Allow: " + allow + "\r\n";
+            return reply;
+        }
+
+        private static void Handle(TcpClient client, Bridge bridge, X509Certificate2 cert)
+        {
+            Stream stream = null;
             try
             {
                 client.NoDelay = true;
-                string remote = client.Client.RemoteEndPoint.ToString();
-                NetworkStream raw = client.GetStream();
-
-                Stream stream = raw;
+                string remote = Host(client.Client.RemoteEndPoint.ToString());
+                stream = client.GetStream();
                 if (cert != null)
                 {
-                    var ssl = new SslStream(raw, false);
+                    var ssl = new SslStream(stream, false);
+                    stream = ssl;
                     try
                     {
                         ssl.AuthenticateAsServer(cert, false,
@@ -1365,168 +1576,23 @@ namespace DictationBridge
                     catch (Exception e)
                     {
                         Log.Write("TLS failed from " + remote + ": " + e.Message);
-                        try { client.Close(); } catch (Exception) { }
                         return;
                     }
-                    stream = ssl;
                 }
 
-                // Read until the end of the request head.
-                var buf = new List<byte>();
-                var chunk = new byte[4096];
-                int headEnd = -1;
-                while (headEnd < 0)
+                Reply reply;
+                Request request = ReadRequest(stream, remote, out reply);
+                if (request != null)
                 {
-                    int n = stream.Read(chunk, 0, chunk.Length);
-                    if (n <= 0) { client.Close(); return; }
-                    for (int k = 0; k < n; k++) buf.Add(chunk[k]);
-
-                    int len = buf.Count;
-                    for (int i = 3; i < len; i++)
-                    {
-                        if (buf[i - 3] == 13 && buf[i - 2] == 10 &&
-                            buf[i - 1] == 13 && buf[i] == 10)
-                        {
-                            // i is the index of the final \n.
-                            headEnd = i + 1;
-                            break;
-                        }
-                    }
-                    if (buf.Count > 65536) { client.Close(); return; }
+                    // Quiet, not Write: the phone polls /status every second or
+                    // two and those repeats would bury the startup and crash
+                    // lines. The client's ephemeral port is left out, or nothing
+                    // would ever match and nothing would be suppressed.
+                    Log.Quiet(request.Method + " " + request.Path + " from " + remote +
+                              " body=" + request.Body.Length);
+                    reply = Route(request, bridge, cert != null ? "https" : "http");
                 }
-
-                byte[] all = buf.ToArray();
-                string head = Encoding.ASCII.GetString(all, 0, headEnd);
-                string[] lines = head.Split(new[] { "\r\n" }, StringSplitOptions.None);
-                if (lines.Length == 0) { client.Close(); return; }
-
-                string[] first = lines[0].Split(' ');
-                string method = first.Length > 0 ? first[0] : "";
-                string path = first.Length > 1 ? first[1] : "/";
-
-                string contentLength = "0";
-                for (int i = 1; i < lines.Length; i++)
-                {
-                    int colon = lines[i].IndexOf(':');
-                    if (colon <= 0) continue;
-                    if (lines[i].Substring(0, colon).Trim()
-                        .Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
-                    {
-                        contentLength = lines[i].Substring(colon + 1).Trim();
-                    }
-                }
-
-                int want;
-                if (!int.TryParse(contentLength, out want)) want = 0;
-                if (want < 0 || want > 65536) want = 0;
-
-                var body = new List<byte>();
-                for (int i = headEnd; i < all.Length; i++) body.Add(all[i]);
-                while (body.Count < want)
-                {
-                    int n = stream.Read(chunk, 0, chunk.Length);
-                    if (n <= 0) break;
-                    for (int k = 0; k < n; k++) body.Add(chunk[k]);
-                }
-
-                int q = path.IndexOf('?');
-                if (q >= 0) path = path.Substring(0, q);
-
-                // Quiet, not Write: the phone polls /status every second or two and
-                // those repeats would bury the startup and crash lines. The
-                // client's ephemeral port is left out of the key, or nothing would
-                // ever match and nothing would be suppressed.
-                Log.Quiet(method + " " + path + " from " + Host(remote) +
-                          " body=" + want);
-
-                string outBody;
-                string outType = "text/plain; charset=utf-8";
-                int status = 200;
-
-                if (path == "/" || path == "/index.html")
-                {
-                    outBody = Page();
-                    outType = "text/html; charset=utf-8";
-                }
-                else if (path == "/config")
-                {
-                    // The page version lets an already-open phone notice that the
-                    // desktop rebuilt the page and reload itself, instead of
-                    // quietly running stale JavaScript.
-                    outBody = "{\"token\":" + Bridge.Json(token) +
-                              ",\"version\":" + Bridge.Json(PageVersion()) + "}";
-                    outType = "application/json";
-                }
-                else if (path == "/status")
-                {
-                    bridge.Touch();
-                    outBody = bridge.StatusJson();
-                    outType = "application/json";
-                }
-                else if (path == "/diag" && method == "POST")
-                {
-                    // Written verbatim to a diagnostics file so a failure that only
-                    // reproduces on the phone can be read back after the fact.
-                    string reportText = Encoding.UTF8.GetString(body.ToArray());
-                    string supplied = Extract(reportText, "token");
-                    if (supplied != null && bridge.CheckToken(supplied))
-                    {
-                        Log.WriteDiag(reportText);
-                        Log.Write("  diagnostics accepted from " + remote +
-                                  " (" + want + " bytes)");
-                        outBody = "{\"ok\":true}";
-                    }
-                    else
-                    {
-                        status = 403;
-                        outBody = "{\"error\":\"bad token\"}";
-                    }
-                    outType = "application/json";
-                }
-                else if (path == "/speak" && method == "POST")
-                {
-                    string payloadText = Encoding.UTF8.GetString(body.ToArray());
-                    string supplied = Extract(payloadText, "token");
-                    string spoken = Extract(payloadText, "text");
-
-                    if (supplied == null || !bridge.CheckToken(supplied))
-                    {
-                        status = 403;
-                        outBody = "{\"error\":\"bad token\"}";
-                        outType = "application/json";
-                        Log.Write("  rejected /speak: bad token");
-                    }
-                    else
-                    {
-                        bridge.OnText(spoken ?? "");
-                        outBody = "{\"ok\":true}";
-                        outType = "application/json";
-                    }
-                }
-                else
-                {
-                    status = 404;
-                    outBody = "not found";
-                }
-
-                byte[] payloadBytes = Encoding.UTF8.GetBytes(outBody);
-                string statusText = status == 200 ? "200 OK"
-                    : status == 403 ? "403 Forbidden" : "404 Not Found";
-                // no-store alone is not reliably honoured on iOS: Safari keeps a
-                // copy in its back/forward cache and will re-serve it after the
-                // desktop rebuilds the page. Spell it out every way.
-                byte[] responseHead = Encoding.ASCII.GetBytes(
-                    "HTTP/1.1 " + statusText + "\r\n" +
-                    "Content-Type: " + outType + "\r\n" +
-                    "Content-Length: " + payloadBytes.Length + "\r\n" +
-                    "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n" +
-                    "Pragma: no-cache\r\n" +
-                    "Expires: 0\r\n" +
-                    "Access-Control-Allow-Origin: *\r\n" +
-                    "Connection: close\r\n\r\n");
-                stream.Write(responseHead, 0, responseHead.Length);
-                stream.Write(payloadBytes, 0, payloadBytes.Length);
-                stream.Flush();
+                if (reply != null) Send(stream, reply);
             }
             catch (Exception e)
             {
@@ -1536,7 +1602,385 @@ namespace DictationBridge
             }
             finally
             {
+                if (stream != null)
+                {
+                    try { stream.Dispose(); } catch (Exception) { }
+                }
                 try { client.Close(); } catch (Exception) { }
+            }
+        }
+
+        // One request off the stream. Null with no reply when the connection
+        // ended or sent something not worth answering; null with a reply when
+        // it is worth telling what was wrong.
+        private static Request ReadRequest(Stream stream, string remote, out Reply refusal)
+        {
+            refusal = null;
+            var received = new MemoryStream();
+            var chunk = new byte[4096];
+            int headEnd = -1;
+            int scanFrom = 3;
+            while (headEnd < 0)
+            {
+                int n = stream.Read(chunk, 0, chunk.Length);
+                if (n <= 0) return null;
+                received.Write(chunk, 0, n);
+
+                byte[] data = received.GetBuffer();
+                int length = (int)received.Length;
+                // From just before the new bytes, so a terminator split across
+                // two reads is still found.
+                for (int i = scanFrom; i < length; i++)
+                {
+                    if (data[i - 3] == 13 && data[i - 2] == 10 &&
+                        data[i - 1] == 13 && data[i] == 10)
+                    {
+                        // i is the index of the final \n.
+                        headEnd = i + 1;
+                        break;
+                    }
+                }
+                scanFrom = Math.Max(3, length);
+                if (headEnd < 0 && length > MaxHead) return null;
+            }
+
+            byte[] all = received.ToArray();
+            string head = Encoding.ASCII.GetString(all, 0, headEnd);
+            string[] lines = head.Split(new[] { "\r\n" }, StringSplitOptions.None);
+            string[] first = lines[0].Split(' ');
+            if (first.Length < 2)
+            {
+                refusal = Error(400, "bad-request");
+                return null;
+            }
+
+            var request = new Request();
+            request.Remote = remote;
+            request.Method = first[0];
+            string target = first[1];
+            int query = target.IndexOf('?');
+            request.Path = query >= 0 ? target.Substring(0, query) : target;
+            for (int i = 1; i < lines.Length; i++)
+            {
+                int colon = lines[i].IndexOf(':');
+                if (colon <= 0) continue;
+                string name = lines[i].Substring(0, colon).Trim();
+                // The first copy wins. A request that repeats a header is either
+                // broken or trying something, and neither deserves the second
+                // say.
+                if (!request.Headers.ContainsKey(name))
+                {
+                    request.Headers[name] = lines[i].Substring(colon + 1).Trim();
+                }
+            }
+
+            // Chunked bodies are not supported. Browsers never send one for a
+            // fetch with a string body, and reading it as empty -- which is
+            // what would happen otherwise -- fails with a misleading reason.
+            if (request.Header("Transfer-Encoding") != null)
+            {
+                refusal = Error(411, "length-required");
+                return null;
+            }
+            int want = 0;
+            string declared = request.Header("Content-Length");
+            if (declared != null && (!int.TryParse(declared, out want) || want < 0))
+            {
+                refusal = Error(400, "bad-length");
+                return null;
+            }
+            if (want > MaxBody)
+            {
+                // Said out loud. An oversized body used to be read as an empty
+                // one, so the request failed with a reason that had nothing to
+                // do with it.
+                refusal = Error(413, "too-large");
+                return null;
+            }
+
+            var body = new MemoryStream();
+            body.Write(all, headEnd, all.Length - headEnd);
+            while (body.Length < want)
+            {
+                int n = stream.Read(chunk, 0, chunk.Length);
+                if (n <= 0) return null;
+                body.Write(chunk, 0, n);
+            }
+            byte[] bytes = new byte[want];
+            Array.Copy(body.GetBuffer(), bytes, want);
+            request.Body = bytes;
+            return request;
+        }
+
+        private static Reply Route(Request request, Bridge bridge, string scheme)
+        {
+            string path = request.Path;
+            if (path == "/" || path == "/index.html")
+            {
+                if (request.Method != "GET") return NotAllowed("GET");
+                var page = new Reply();
+                page.Type = "text/html; charset=utf-8";
+                page.Body = Page();
+                // Nothing else gets to frame the page: it holds the pairing key.
+                page.Headers = "Content-Security-Policy: frame-ancestors 'none'\r\n" +
+                               "X-Frame-Options: DENY\r\n";
+                return page;
+            }
+            if (path == "/favicon.ico" ||
+                path.StartsWith("/apple-touch-icon", StringComparison.Ordinal))
+            {
+                // Safari asks for these on every visit, and a 404 apiece was the
+                // most common line in the log. There is no icon to give it.
+                var nothing = new Reply();
+                nothing.Status = 204;
+                return nothing;
+            }
+            if (path == "/config")
+            {
+                if (request.Method != "GET") return NotAllowed("GET");
+                // The page version only, so a phone left open across a rebuild
+                // notices and reloads itself. This used to carry the session
+                // token as well, which handed it to anyone who asked.
+                return Json(200, "{\"version\":" + Bridge.Json(PageVersion()) + "}");
+            }
+
+            bool status = path == "/status";
+            bool speak = path == "/speak";
+            bool diag = path == "/diag";
+            if (!status && !speak && !diag)
+            {
+                var missing = new Reply();
+                missing.Status = 404;
+                missing.Type = "text/plain; charset=utf-8";
+                missing.Body = "not found";
+                return missing;
+            }
+            string method = status ? "GET" : "POST";
+            if (request.Method != method) return NotAllowed(method);
+
+            Reply refusal = Admit(request, bridge, scheme, !status);
+            if (refusal != null) return refusal;
+
+            if (status)
+            {
+                bridge.Touch();
+                return Json(200, bridge.StatusJson());
+            }
+            if (speak)
+            {
+                string spoken = Extract(request.BodyText(), "text");
+                if (spoken == null) return Error(400, "no-text");
+                bridge.OnText(spoken);
+                return Json(200, "{\"ok\":true}");
+            }
+
+            // Written verbatim to a diagnostics file so a failure that only
+            // reproduces on the phone can be read back after the fact.
+            Log.WriteDiag(request.BodyText());
+            Log.Write("  diagnostics accepted from " + request.Remote + " (" +
+                      request.Body.Length + " bytes)");
+            return Json(200, "{\"ok\":true}");
+        }
+
+        // Everything that types, reports or reveals anything comes through here.
+        // The key is what keeps a stranger out. The rest is belt and braces
+        // against a web page open in some other tab on the same network, which
+        // would not know the key either but has no business trying.
+        private static Reply Admit(Request request, Bridge bridge, string scheme, bool hasBody)
+        {
+            string why = null;
+            int status = 401;
+            string origin = request.Header("Origin");
+            string site = request.Header("Sec-Fetch-Site");
+            string type = request.Header("Content-Type");
+            string key = request.Header(KeyHeader);
+            if (origin != null && !string.Equals(origin, scheme + "://" + request.Header("Host"),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                status = 403;
+                why = "sent from another site (" + Clip(origin) + ")";
+            }
+            else if (site == "cross-site" || site == "same-site")
+            {
+                status = 403;
+                why = "sent from another site (" + site + ")";
+            }
+            else if (hasBody && (type == null || !type.TrimStart().StartsWith(
+                         "application/json", StringComparison.OrdinalIgnoreCase)))
+            {
+                status = 415;
+                why = "not JSON";
+            }
+            else if (!Pairing.Matches(key))
+            {
+                why = key == null ? "no pairing key" : "wrong pairing key";
+            }
+
+            if (why == null)
+            {
+                Strikes.Clear(request.Remote);
+                Pairing.MarkUsed();
+                return null;
+            }
+
+            // Checked only once a request has already failed, so a phone with
+            // the right key is never held up by refusals from the same address.
+            int wait = Strikes.BlockedFor(request.Remote);
+            if (wait > 0)
+            {
+                Reply slow = Error(429, "slow-down");
+                slow.Headers = "Retry-After: " + wait + "\r\n";
+                return slow;
+            }
+
+            // Quiet: a phone left open after a reset asks every few seconds, and
+            // one line about it is enough.
+            Log.Quiet("refused " + request.Method + " " + request.Path + " from " +
+                      request.Remote + ": " + why);
+            if (Strikes.Add(request.Remote))
+            {
+                Log.Write("refusing " + request.Remote + " for " + Strikes.BlockSeconds +
+                          "s after " + Strikes.Limit + " refused requests inside a minute");
+            }
+            if (status == 401) bridge.Refused();
+            return Error(status, status == 401 ? "not-paired"
+                : status == 403 ? "cross-site" : "not-json");
+        }
+
+        private static string Clip(string text)
+        {
+            return text.Length <= 80 ? text : text.Substring(0, 80) + "...";
+        }
+
+        // Refused requests per address. A 96-bit key cannot be guessed at any
+        // rate a network allows, so this is not what keeps the key secret. It
+        // stops one misbehaving device from filling the log, one refusal at a
+        // time, for as long as it cares to keep asking.
+        private static class Strikes
+        {
+            public const int Limit = 30;
+            public const int BlockSeconds = 120;
+            private const int MaxTracked = 256;
+
+            private sealed class Entry
+            {
+                public DateTime WindowStart;
+                public int Count;
+                public DateTime BlockedUntil;
+            }
+
+            private static readonly Dictionary<string, Entry> Table =
+                new Dictionary<string, Entry>();
+
+            public static int BlockedFor(string host)
+            {
+                lock (Table)
+                {
+                    Entry entry;
+                    if (!Table.TryGetValue(host, out entry)) return 0;
+                    double left = (entry.BlockedUntil - DateTime.UtcNow).TotalSeconds;
+                    return left > 0 ? (int)Math.Ceiling(left) : 0;
+                }
+            }
+
+            // True for the refusal that starts a block.
+            public static bool Add(string host)
+            {
+                DateTime now = DateTime.UtcNow;
+                lock (Table)
+                {
+                    if (Table.Count >= MaxTracked) Prune(now);
+                    Entry entry;
+                    if (!Table.TryGetValue(host, out entry))
+                    {
+                        entry = new Entry { WindowStart = now };
+                        Table[host] = entry;
+                    }
+                    if ((now - entry.WindowStart).TotalSeconds > 60)
+                    {
+                        entry.WindowStart = now;
+                        entry.Count = 0;
+                    }
+                    entry.Count++;
+                    if (entry.Count < Limit) return false;
+                    entry.BlockedUntil = now.AddSeconds(BlockSeconds);
+                    entry.WindowStart = now;
+                    entry.Count = 0;
+                    return true;
+                }
+            }
+
+            public static void Clear(string host)
+            {
+                lock (Table) { Table.Remove(host); }
+            }
+
+            private static void Prune(DateTime now)
+            {
+                var stale = new List<string>();
+                foreach (KeyValuePair<string, Entry> pair in Table)
+                {
+                    if ((now - pair.Value.WindowStart).TotalSeconds > 60 &&
+                        pair.Value.BlockedUntil <= now)
+                    {
+                        stale.Add(pair.Key);
+                    }
+                }
+                foreach (string host in stale) Table.Remove(host);
+                // Still full means a flood of addresses. Start again rather than
+                // grow without limit.
+                if (Table.Count >= MaxTracked) Table.Clear();
+            }
+        }
+
+        private static void Send(Stream stream, Reply reply)
+        {
+            byte[] payload = Encoding.UTF8.GetBytes(reply.Body ?? "");
+            var head = new StringBuilder();
+            head.Append("HTTP/1.1 ").Append(reply.Status).Append(' ')
+                .Append(Reason(reply.Status)).Append("\r\n");
+            if (reply.Status != 204)
+            {
+                head.Append("Content-Type: ").Append(reply.Type).Append("\r\n");
+                head.Append("Content-Length: ").Append(payload.Length).Append("\r\n");
+            }
+            // no-store alone is not reliably honoured on iOS: Safari keeps a copy
+            // in its back/forward cache and will re-serve it after the desktop
+            // rebuilds the page. Spell it out every way.
+            head.Append("Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n");
+            head.Append("Pragma: no-cache\r\n");
+            head.Append("Expires: 0\r\n");
+            // There is no Access-Control-Allow-Origin any more. It used to be "*",
+            // which let any web page on any device read /status -- including the
+            // tail of what had just been typed.
+            head.Append("X-Content-Type-Options: nosniff\r\n");
+            head.Append("Referrer-Policy: no-referrer\r\n");
+            head.Append(reply.Headers);
+            head.Append("Connection: close\r\n\r\n");
+
+            byte[] headBytes = Encoding.ASCII.GetBytes(head.ToString());
+            stream.Write(headBytes, 0, headBytes.Length);
+            if (payload.Length > 0) stream.Write(payload, 0, payload.Length);
+            stream.Flush();
+        }
+
+        private static string Reason(int status)
+        {
+            switch (status)
+            {
+                case 200: return "OK";
+                case 204: return "No Content";
+                case 400: return "Bad Request";
+                case 401: return "Unauthorized";
+                case 403: return "Forbidden";
+                case 404: return "Not Found";
+                case 405: return "Method Not Allowed";
+                case 411: return "Length Required";
+                case 413: return "Payload Too Large";
+                case 415: return "Unsupported Media Type";
+                case 429: return "Too Many Requests";
+                case 503: return "Service Unavailable";
+                default: return "Error";
             }
         }
 
@@ -2048,6 +2492,7 @@ namespace DictationBridge
         private Point _dragOrigin;
         private bool _dragging;
         private bool _expanded;
+        private bool _pairedAtStart;
         private int _pulsePhase;
         private PaintDot _lamp;
         private PaintText _phoneState;
@@ -2056,9 +2501,17 @@ namespace DictationBridge
 
         // One place that owns the sizes, so expand and collapse cannot disagree.
         // The expanded panel lost the queue list, the hold-until-armed checkbox and
-        // the hotkey row, so it is shorter than it was.
+        // the hotkey row, so it is shorter than it was. Eight pixels taller than
+        // that again since the QR code started carrying the pairing key.
         private static readonly Size CollapsedSize = new Size(320, 56);
-        private static readonly Size ExpandedSize = new Size(320, 318);
+        private static readonly Size ExpandedSize = new Size(320, 326);
+        // The QR code and the card around it. The pairing key makes the code one
+        // size step bigger, 41 modules with the quiet zone; 124px keeps every
+        // module three whole pixels wide, which a phone camera resolves easily.
+        private const int QrSide = 124;
+        private const int QrInset = 8;
+        private const int UrlCardHeight = QrSide + QrInset * 2;
+        private const int UrlTextLeft = QrSide + QrInset * 2 - 2;
         private const string PositionFile = "dictation-bridge-position.txt";
 
         public MainForm(Bridge bridge, string url, ContextMenuStrip panelMenu)
@@ -2101,7 +2554,11 @@ namespace DictationBridge
 
             _bridge.Changed += Refresh2;
             _timer = new System.Windows.Forms.Timer { Interval = 700 };
-            _timer.Tick += (s, e) => Refresh2();
+            _timer.Tick += (s, e) =>
+            {
+                WatchPairing();
+                Refresh2();
+            };
             _timer.Start();
 
             // A slow breath on the lamp while the phone is in touch, so it is obvious at a
@@ -2259,7 +2716,7 @@ namespace DictationBridge
             var urlCard = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 132,
+                Height = UrlCardHeight,
                 BackColor = Skin.Surface
             };
             var urlBg = new PaintCard
@@ -2269,20 +2726,19 @@ namespace DictationBridge
                 Corner = 8
             };
 
+            // The code carries the pairing link, not the bare address: scanning
+            // it is what pairs the phone.
             _qr = new QrView
             {
-                Location = new Point(8, 8),
-                // The encoder emits a 29-module symbol for a typical address
-                // (21 + quiet zone). At 4px per module that is 116px, which
-                // leaves a module wide enough for a phone camera to resolve.
-                Size = new Size(116, 116)
+                Location = new Point(QrInset, QrInset),
+                Size = new Size(QrSide, QrSide)
             };
-            _qr.SetAddress(_url);
+            _qr.SetAddress(Pairing.Link(_url));
 
             var urlRight = new Panel
             {
-                Location = new Point(130, 0),
-                Size = new Size(urlCard.Width - 130, urlCard.Height),
+                Location = new Point(UrlTextLeft, 0),
+                Size = new Size(urlCard.Width - UrlTextLeft, urlCard.Height),
                 BackColor = Skin.Field
             };
             _urlLink = new LinkLabel
@@ -2295,15 +2751,20 @@ namespace DictationBridge
                 ActiveLinkColor = Skin.Accent,
                 BackColor = Skin.Field
             };
-            _urlLink.Text = _url;
-            _urlLink.LinkClicked += (s, e) => Copy(_url);
+            // The address is still shown, because it is what to check when the
+            // phone cannot connect, but the caption says what actually pairs.
+            const string caption = "Scan with the iPhone camera to pair";
+            _urlLink.Text = caption + "\n\n" + _url;
+            _urlLink.LinkArea = new LinkArea(caption.Length + 2, _url.Length);
+            _urlLink.ForeColor = Skin.InkSoft;
+            _urlLink.LinkClicked += (s, e) => CopyPairingLink();
             urlRight.Controls.Add(_urlLink);
             urlCard.Resize += (s, e) =>
             {
                 // Absolute coordinates inside a docked panel do not shrink that
                 // panel's minimum size, so the right-hand box is kept in step
                 // with the card here rather than relying on Dock.
-                urlRight.Width = urlCard.ClientSize.Width - 130;
+                urlRight.Width = urlCard.ClientSize.Width - UrlTextLeft;
                 urlRight.Height = urlCard.ClientSize.Height;
             };
 
@@ -2365,7 +2826,7 @@ namespace DictationBridge
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
             bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
 
-            var copyButton = SoftButtonOf("Copy address", (s, e) => Copy(_url));
+            var copyButton = SoftButtonOf("Copy pairing link", (s, e) => CopyPairingLink());
             // Close() alone is swallowed by hide-to-tray, so quit is routed back
             // to the tray context which knows how to really exit.
             var quitButton = SoftButtonOf("Quit", (s, e) => Quit());
@@ -2385,7 +2846,10 @@ namespace DictationBridge
             _body.Controls.Add(_strip);
 
             host.Controls.Add(_body);
-            SetExpanded(false);
+            // Open on the QR code until a phone has paired: before that, the
+            // code is the only thing on the panel worth looking at.
+            _pairedAtStart = Pairing.Used;
+            SetExpanded(!_pairedAtStart);
 
             MakeDraggable(_strip);
             MakeDraggable(_body);
@@ -2544,10 +3008,37 @@ namespace DictationBridge
             _strip.Invalidate();
         }
 
-        private void Copy(string text)
+        // The link carries the key, so the log only says that it was copied.
+        public void CopyPairingLink()
         {
-            try { Clipboard.SetText(text); Log.Write("copied " + text); }
-            catch (Exception) { }
+            try
+            {
+                Clipboard.SetText(Pairing.Link(_url));
+                Log.Write("copied the pairing link");
+            }
+            catch (Exception e)
+            {
+                Log.Write("WARN: could not copy the pairing link: " + e.Message);
+            }
+        }
+
+        // After a reset: the old code no longer works, so show the new one.
+        public void ShowPairing()
+        {
+            _qr.SetAddress(Pairing.Link(_url));
+            _pairedAtStart = false;
+            SetExpanded(true);
+            Refresh2();
+        }
+
+        // Collapses once, when the first phone pairs: the code has done its job,
+        // and the strip is what is worth watching from then on. Runs on the
+        // timer, so it is always on the UI thread.
+        private void WatchPairing()
+        {
+            if (_pairedAtStart || !Pairing.Used) return;
+            _pairedAtStart = true;
+            if (_expanded) SetExpanded(false);
         }
 
         private void Refresh2()
@@ -2568,6 +3059,8 @@ namespace DictationBridge
             if (_phoneState != null)
             {
                 if (present) _phoneState.Set("listening on the phone", Skin.Good);
+                else if (_bridge.RecentlyRefused) _phoneState.Set("phone not paired: scan the QR code", Skin.Warn);
+                else if (!Pairing.Used) _phoneState.Set("scan the QR code to pair", Skin.Warn);
                 else _phoneState.Set("tap Start on the phone", Skin.Warn);
             }
 
@@ -2588,10 +3081,9 @@ namespace DictationBridge
         private readonly Bridge _bridge;
         private readonly NotifyIcon _tray;
 
-        public TrayContext(Bridge bridge, string token, string url)
+        public TrayContext(Bridge bridge, string url)
         {
             _bridge = bridge;
-            _appUrl = url;
 
             var quitItem = new ToolStripMenuItem("Quit");
             quitItem.Click += (s, e) =>
@@ -2620,14 +3112,15 @@ namespace DictationBridge
                 }
             };
 
-            var copyItem = new ToolStripMenuItem("Copy page address");
-            copyItem.Click += (s, e) =>
-            {
-                try { Clipboard.SetText(url); Log.Write("copied " + url); } catch (Exception) { }
-            };
+            // One copy item. There used to be two, "Copy app address" and "Copy
+            // page address", and they copied the same string. The address alone
+            // no longer pairs a phone, so what is worth copying is the link that
+            // carries the key.
+            var copyItem = new ToolStripMenuItem("Copy pairing link");
+            copyItem.Click += (s, e) => _form.CopyPairingLink();
 
-            var appItem = new ToolStripMenuItem("Copy app address");
-            appItem.Click += (s, e) => CopyText(_appUrl);
+            var resetItem = new ToolStripMenuItem("Reset phone pairing...");
+            resetItem.Click += (s, e) => ResetPairing();
 
             var showItem = new ToolStripMenuItem("Show window");
             showItem.Click += (s, e) => ShowWindow();
@@ -2638,9 +3131,10 @@ namespace DictationBridge
             var menu = new ContextMenuStrip();
             menu.Items.Add(showItem);
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(appItem);
             menu.Items.Add(copyItem);
+            menu.Items.Add(resetItem);
             menu.Items.Add(logItem);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(quitItem);
 
             _tray = new NotifyIcon
@@ -2676,13 +3170,22 @@ namespace DictationBridge
         }
 
         private readonly MainForm _form;
-        private readonly string _appUrl;
         private bool _reallyQuitting;
 
-        private static void CopyText(string text)
+        // Asks first: every phone that scanned the old code stops typing until
+        // it scans the new one, and there is no undo.
+        private void ResetPairing()
         {
-            try { Clipboard.SetText(text); }
-            catch (Exception) { }
+            DialogResult answer = MessageBox.Show(_form,
+                "Unpair every phone?\n\n" +
+                "A new QR code replaces the old one. Phones that scanned the old " +
+                "code stop typing on this PC until they scan the new one.",
+                "Reset phone pairing", MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.OK) return;
+            Pairing.Reset();
+            _form.ShowPairing();
+            ShowWindow();
         }
 
         private void ShowWindow()
@@ -2701,7 +3204,10 @@ namespace DictationBridge
             // "typing" rather than "armed": the armed/buffered wording described a
             // gate that no longer exists. What the tooltip can honestly report is
             // whether the phone is still in touch.
-            string status = _bridge.PhonePresent ? "typing" : "waiting for the phone";
+            string status = _bridge.PhonePresent ? "typing"
+                : _bridge.RecentlyRefused ? "phone not paired, scan the QR code"
+                : !Pairing.Used ? "scan the QR code to pair"
+                : "waiting for the phone";
             string tip = "Dictation Bridge: " + status;
             if (tip.Length > 63) tip = tip.Substring(0, 63);
             _tray.Text = tip;
@@ -2766,8 +3272,6 @@ namespace DictationBridge
             }
             Log.Write("port: " + httpPort + (portWasChosen ? " (chosen on the command line)" : " (default)"));
 
-            string token = Guid.NewGuid().ToString("N").Substring(0, 8);
-
             Log.Say("Dictation Bridge");
             Log.Say("===============");
             Log.Say("Your files are in: " + Store.Dir);
@@ -2799,7 +3303,14 @@ namespace DictationBridge
             bool secure = pfx != null;
             string scheme = secure ? "https" : "http";
 
-            var bridge = new Bridge(token);
+            // Before the listener, so a pairing file that cannot be read or
+            // written is reported at startup rather than on the first request.
+            Log.Stage("pairing key");
+            Log.Write(Pairing.Used
+                ? "pairing: a phone is paired (key in data\\pairing-key.txt)"
+                : "pairing: no phone paired yet, scan the QR code on the panel");
+
+            var bridge = new Bridge();
             // One port for the page and the socket. iOS accepted TLS on the HTTP
             // port but rejected it on a second listener using the same
             // certificate, so both now share the port that already worked.
@@ -2807,7 +3318,7 @@ namespace DictationBridge
             // Only move the port when it was not asked for. A port passed on the
             // command line is a decision, usually because something else is
             // already using the default, so it is never quietly second-guessed.
-            int boundPort = Servers.StartAll(bridge, token, httpPort, pfx, !portWasChosen);
+            int boundPort = Servers.StartAll(bridge, httpPort, pfx, !portWasChosen);
             if (boundPort != httpPort)
             {
                 Log.Write("NOTE: the app is on port " + boundPort + " rather than " +
@@ -2818,7 +3329,6 @@ namespace DictationBridge
 
             Log.Write("listening: " + scheme + " on " + boundPort + " (page and socket share it)");
             Log.Write("open this on the phone: " + url);
-            Log.Write("token: " + token);
             Log.Write("embedded page version: " + Servers.PageVersion());
 
             Log.Say("");
@@ -2832,12 +3342,16 @@ namespace DictationBridge
                 Log.Say("   2. Settings > General > VPN & Device Management > Install.");
                 Log.Say("   3. Settings > General > About > Certificate Trust Settings");
                 Log.Say("      > enable the Dictation Bridge certificate.");
-                Log.Say("   4. Open:  " + url);
+                Log.Say("   4. Scan the QR code on the panel with the Camera app.");
             }
             else
             {
-                Log.Say("  Open:  " + url);
+                Log.Say("  Scan the QR code on the panel with the Camera app.");
             }
+            // The address alone opens the page but cannot pair it: the key is in
+            // the QR code, and only there.
+            Log.Say("  The code carries the pairing key, so typing " + url);
+            Log.Say("  by hand opens the page without pairing it.");
             Log.Say("  Leave Start on and it keeps listening. Whatever you say is typed");
             Log.Say("  straight into whatever window you are working in.");
             Log.Say("");
@@ -2845,7 +3359,7 @@ namespace DictationBridge
             Log.Stage("building the panel");
             Application.EnableVisualStyles();
 
-            TrayContext context = new TrayContext(bridge, token, url);
+            TrayContext context = new TrayContext(bridge, url);
 
             Log.Stage("running");
             Log.Write("uptime at startup: " + (Environment.TickCount / 1000) + "s since boot");

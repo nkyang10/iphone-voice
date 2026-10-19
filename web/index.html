@@ -94,6 +94,7 @@ button {
   <select id="lang"></select>
 </div>
 
+<div class="warnbox" id="pairWarn" role="alert"></div>
 <div class="warnbox" id="warn"></div>
   <div class="pendingbox" id="pending">
     <span id="pendingText"></span>
@@ -161,6 +162,7 @@ button {
     recDot: document.getElementById('recDot'),
     recLabel: document.getElementById('recLabel'),
     warn: document.getElementById('warn'),
+    pairWarn: document.getElementById('pairWarn'),
     start: document.getElementById('start'),
     stop: document.getElementById('stop'),
     final: document.getElementById('final'),
@@ -178,7 +180,7 @@ button {
   };
 
   var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0, rewritesHeld: 0 };
-  var token = null, wantRun = false;
+  var wantRun = false;
   var history = [];
   var rec = null, lastEvent = 0, watchdog = null, restartTimer = null;
 
@@ -287,20 +289,93 @@ button {
     }
   }
 
+  // ---- pairing --------------------------------------------------------------
+  // The desktop used to hand every visitor a session token from /config, and
+  // anything else on the Wi-Fi could ask for it just as easily. The key now comes
+  // from the QR code instead, after the '#', which a browser never sends to any
+  // server. The page keeps a copy, so a reload, a bookmark or an address typed by
+  // hand still works once this phone has scanned the code. The '#k=' stays in the
+  // address too: it is what a bookmark or a home-screen icon carries with it.
+
+  var PAIR_KEY = 'db-pair-key';
+  var pairKey = '';
+
+  function keyFromHash() {
+    var m = /(?:^#|&)k=([0-9a-fA-F]{16,64})(?=&|$)/.exec(location.hash || '');
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  // The address wins over storage: scanning a new code is how a phone re-pairs
+  // after the desktop's pairing was reset.
+  function loadPairKey() {
+    var fromHash = keyFromHash();
+    var stored = '';
+    try { stored = localStorage.getItem(PAIR_KEY) || ''; } catch (e) {}
+    if (fromHash) {
+      if (fromHash !== stored) {
+        try { localStorage.setItem(PAIR_KEY, fromHash); } catch (e) {}
+      }
+      pairKey = fromHash;
+      note('pair', 'key from the address' + (stored && stored !== fromHash ? ', replacing the stored one' : ''));
+    } else {
+      pairKey = stored;
+      note('pair', stored ? 'key from storage' : 'no key');
+    }
+  }
+
   // ---- transport ------------------------------------------------------------
   // Plain HTTP, same origin as the page. No handshake to get wrong, and the
   // desktop learns the phone is alive from the status poll.
 
   function post(path, payload) {
+    var headers = {};
+    if (payload) headers['Content-Type'] = 'application/json';
+    if (pairKey) headers['X-Dictation-Key'] = pairKey;
     return fetch(path, {
       method: payload ? 'POST' : 'GET',
-      headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+      headers: headers,
       body: payload ? JSON.stringify(payload) : undefined,
       cache: 'no-store'
     }).then(function (r) {
-      if (!r.ok) throw new Error('http ' + r.status);
+      if (!r.ok) {
+        var err = new Error('http ' + r.status);
+        err.status = r.status;
+        throw err;
+      }
       return r.json();
     });
+  }
+
+  // What the page knows about the desktop, in one place, so the dot, the label
+  // and the pairing warning cannot disagree.
+  //   checking  not heard back yet
+  //   ok        answering, and this phone's key is accepted
+  //   unpaired  answering, but refusing this phone's key, or there is none
+  //   busy      refusing for a while after too many failed requests
+  //   down      not answering at all
+  var link = 'checking';
+
+  function setLink(state) {
+    if (state === link) return;
+    note('link', link + ' -> ' + state);
+    link = state;
+    var text = {
+      checking: 'connecting to desktop',
+      ok: 'connected to desktop',
+      unpaired: 'not paired with this PC',
+      busy: 'desktop is refusing requests for a minute',
+      down: 'desktop not reachable'
+    }[state];
+    el.wsLabel.textContent = text;
+    el.wsDot.className = 'dot ' + (state === 'ok' ? 'ok' : state === 'checking' ? '' : state === 'busy' ? 'warn' : 'bad');
+    var pairMsg = state !== 'unpaired' ? '' : pairKey
+      ? 'The PC no longer accepts this phone\'s pairing key, so nothing you say is typed. ' +
+        'Its pairing was probably reset. Scan the new QR code on the PC\'s Dictation Bridge panel.'
+      : 'This phone is not paired with the PC yet, so nothing you say is typed. ' +
+        'Scan the QR code on the PC\'s Dictation Bridge panel with the Camera app. ' +
+        'Typing the address by hand opens this page, but only the code carries the pairing key.';
+    el.pairWarn.textContent = pairMsg;
+    el.pairWarn.className = pairMsg ? 'warnbox show' : 'warnbox';
   }
 
   // ---- streaming outbox ----------------------------------------------------
@@ -346,7 +421,7 @@ button {
     if (flushing || outbox.length === 0) return;
     flushing = true;
     var chunk = outbox[0];
-    post('/speak', { token: token, text: chunk })
+    post('/speak', { text: chunk })
       .then(function () {
         outbox.shift();
         flushing = false;
@@ -355,27 +430,50 @@ button {
         updatePending();
         flushOutbox();
       })
-      .catch(function () {
+      .catch(function (e) {
         // Leave it at the head. The next status poll retries from here, so nothing
-        // that was said is dropped because the Wi-Fi blinked.
+        // that was said is dropped because the Wi-Fi blinked, or because the phone
+        // has to be paired again first.
         flushing = false;
+        if (e && e.status === 401) setLink('unpaired');
       });
   }
 
   // Polls the desktop and drains anything queued while it was unreachable.
+  // Always resolves: the loop below depends on it.
   function pollStatus() {
     return post('/status').then(function (s) {
-      el.wsDot.className = 'dot ok';
-      el.wsLabel.textContent = 'connected to desktop';
+      setLink('ok');
       // There is no armed flag to read any more: the desktop types whatever
       // arrives, and this page's Start button is the only on/off switch.
       el.typingState.textContent = 'straight into the focused window';
       serverTyped = s.typed;
       flushOutbox();
-    }).catch(function () {
-      el.wsDot.className = 'dot bad';
-      el.wsLabel.textContent = 'desktop not reachable';
-      el.typingState.textContent = 'unknown';
+    }).catch(function (e) {
+      var status = e && e.status;
+      setLink(status === 401 ? 'unpaired' : status === 429 ? 'busy' : 'down');
+      el.typingState.textContent = status === 401 ? 'not paired' : 'unknown';
+    });
+  }
+
+  // One poll at a time, each scheduled when the last one has finished. A fixed
+  // interval could stack requests up behind a slow network. A phone that is not
+  // paired asks far less often: the answer will not change until someone scans
+  // the code, and the desktop starts refusing an address that keeps failing.
+  var SLOW_POLL_MS = 10000;
+  var pollTimer = null, polling = false, pollAgain = false;
+
+  function pollLoop() {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+    if (polling) { pollAgain = true; return; }
+    polling = true;
+    pollAgain = false;
+    pollStatus().then(function () {
+      polling = false;
+      if (pollAgain) { pollLoop(); return; }
+      pollTimer = setTimeout(pollLoop,
+        link === 'unpaired' || link === 'busy' ? SLOW_POLL_MS : POLL_MS);
     });
   }
 
@@ -627,24 +725,30 @@ button {
 
 
   function startPolling() {
-    pollStatus();
-    setInterval(pollStatus, POLL_MS);
-    checkVersion();
+    pollLoop();
+    checkVersion(true);
     setInterval(checkVersion, 60000);
   }
 
   // iOS Safari keeps a cached copy even with no-store, so a phone left open
   // across a desktop rebuild would keep running the old script. Ask the
-  // desktop what it is serving and reload when it differs.
-  function checkVersion() {
+  // desktop what it is serving and reload when it differs. At boot the answer
+  // is only recorded: this copy has just been fetched.
+  function checkVersion(atBoot) {
     return fetch('/config', { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
       .then(function (cfg) {
-        if (!cfg.version) return;
+        if (!cfg || !cfg.version) return;
         var known = null;
         try { known = localStorage.getItem('page-version'); } catch (e) {}
-        if (known === null) {
-          try { localStorage.setItem('page-version', cfg.version); } catch (e) {}
+        if (atBoot === true || known === null) {
+          if (known !== cfg.version) {
+            try { localStorage.setItem('page-version', cfg.version); } catch (e) {}
+          }
+          if (atBoot === true) note('ui', 'page ' + cfg.version);
           return;
         }
         if (known !== cfg.version) {
@@ -759,7 +863,9 @@ button {
 
   function diagReport() {
     return {
-      token: token,
+      // Whether there is a key, never the key itself.
+      paired: !!pairKey,
+      link: link,
       ua: navigator.userAgent,
       secure: !!window.isSecureContext,
       proto: location.protocol,
@@ -1294,21 +1400,23 @@ button {
     clearTimeout(settleTimer);
     settleTimer = null;
     // Last chance for the held-back characters. Best effort like the flush below: a
-    // fetch started here usually does not finish, and there is no navigator.sendBeacon
-    // for a request that carries the token in a body.
+    // fetch started here usually does not finish, and navigator.sendBeacon cannot
+    // carry the pairing key, which travels in a header.
     flushHeld();
     flushOutbox();
     try { if (rec) rec.abort(); } catch (e) {}
   });
 
   // Exposed for diagnostics and for the browser-side test harness. Harmless:
-  // nothing here reaches the desktop except through the same token-checked
+  // nothing here reaches the desktop except through the same key-checked
   // endpoints the page already uses.
   window.dictationBridge = {
     versionCheck: checkVersion,
     stats: function () { return stats; },
     transcript: function () { return history.slice(); },
     queued: function () { return outbox.slice(); },
+    link: function () { return link; },
+    paired: function () { return !!pairKey; },
     button: function () {
       return { disabled: el.start.disabled, label: el.start.textContent, cls: el.start.className };
     },
@@ -1373,12 +1481,29 @@ button {
     el.diagOut.textContent = text;
   }
 
+  // The desktop refuses a body over 64 KB, and four hundred events with the words
+  // logged can pass that. The oldest events go first until the report fits.
+  function utf8Length(text) {
+    try { return unescape(encodeURIComponent(text)).length; }
+    catch (e) { return text.length * 3; }
+  }
+
+  function sendableReport() {
+    var r = diagReport();
+    while (utf8Length(JSON.stringify(r)) > 60000 && r.events.length > 20) {
+      r.events = r.events.slice(Math.ceil(r.events.length / 4));
+      r.trimmed = true;
+    }
+    return r;
+  }
+
   el.diagSend.addEventListener('click', function () {
     note('ui', 'manual report send');
-    post('/diag', diagReport()).then(function () {
+    post('/diag', sendableReport()).then(function () {
       el.diagSend.textContent = 'Sent - see desktop log';
     }).catch(function (e) {
-      el.diagSend.textContent = 'Send failed: ' + e.message;
+      el.diagSend.textContent = e.status === 401
+        ? 'Not sent: pair this phone first' : 'Send failed: ' + e.message;
     });
   });
 
@@ -1420,23 +1545,23 @@ button {
     });
   })();
 
-  post('/config')
-    .then(function (cfg) {
-      token = cfg.token;
-      try {
-        if (cfg.version) localStorage.setItem('page-version', cfg.version);
-      } catch (e) {}
-      note('ui', 'config loaded, page ' + (cfg.version || '?'));
-      noteEnvironment();
-      el.wsLabel.textContent = 'loading';
-      startPolling();
-    })
-    .catch(function () {
-      note('ui', 'config load failed');
-      warn('Could not reach the desktop. Open this page using the https address from the desktop window.');
-      el.wsDot.className = 'dot bad';
-      el.wsLabel.textContent = 'desktop not reachable';
-    });
+  // No round trip before polling starts. The page used to fetch a token from
+  // /config first and gave up for good if that one request failed; now the key is
+  // already here, and the poll loop retries by itself.
+  loadPairKey();
+  noteEnvironment();
+  if (!pairKey) setLink('unpaired');
+  startPolling();
+
+  // Scanning a new code into a tab that is already open only changes the part
+  // after '#', which does not reload the page.
+  window.addEventListener('hashchange', function () {
+    var before = pairKey;
+    loadPairKey();
+    if (pairKey === before) return;
+    setLink('checking');
+    pollLoop();
+  });
 
   // Ship diagnostics automatically when recognition fails, so a bug that only
   // reproduces on the phone still leaves a trace in the desktop log.
@@ -1447,7 +1572,7 @@ button {
     if (Date.now() - lastReport < 45000) return;
     lastReport = Date.now();
     note('auto', 'reporting: errors with nothing heard');
-    post('/diag', diagReport()).catch(function () { });
+    post('/diag', sendableReport()).catch(function () { });
   }, 20000);
 })();
 </script>
