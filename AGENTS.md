@@ -124,7 +124,7 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   `BuildUi`, which the constructor calls, but C# requires the assignment to be
   inside a constructor body.
 - There is no armed flag, no buffer and no hotkey. `Bridge.OnText` types
-  unconditionally, and `/status` carries `typed`, `received` and `phone` only. It
+  unconditionally, and `/status` carries `typed`, `missed`, `received` and `phone` only. It
   used to carry `last`, the tail of the typed text; nothing read it, and it put what
   was said on the wire twice a second.
   Do not reintroduce a desktop gate: the phone's Start button is the switch, and a
@@ -166,10 +166,10 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   `recEnded`. Keep them: a report saying the button was lit while words arrived was
   unexplainable from outside, because every event was logged but not the one variable
   that decides the button.
-- Text is **streamed, not committed per utterance**, and `Injector.TypeText` is called
-  with `appendSpace: false`. The page sends the recognizer's interim results as they
-  arrive; the desktop appends each chunk into the focused window. Three consequences
-  are load-bearing:
+- Text is **streamed, not committed per utterance**, and `Injector.TypeText` adds
+  nothing: no trailing space, and no option for one. The page sends the recognizer's
+  interim results as they arrive; the desktop appends each chunk into the focused window.
+  Three consequences are load-bearing:
   - `KEYEVENTF_UNICODE` cannot select or delete, so **sent text is final**. The page
     anchors on content (`streamAnchor`), and when Safari rewrites words already sent it
     re-anchors and sends nothing for the rewrite, because there is nothing better to do
@@ -246,11 +246,31 @@ a fetch hanging for a minute, and the outbox sends one chunk at a time.
 
 **A chunk is typed at most once.** Each `/speak` carries `page`, random for each load of the
 page, and `seq`, one per chunk and kept across retries. The desktop types a number once and
-answers a repeat, or anything older, with `{"ok":true,"dup":true}`. A reply lost after the
-desktop had typed used to make the retry type it twice. The number is recorded before typing,
-so a failure partway loses text rather than repeating it, which is the right way round for
-keystrokes. Never fold new text into `outbox[0]`: it may have been sent already, and a retry
-has to repeat it exactly.
+answers a repeat, or anything older, with `"dup":true` and what happened the first time. A
+reply lost after the desktop had typed used to make the retry type it twice. The number is
+recorded before typing, so a failure partway loses text rather than repeating it, which is
+the right way round for keystrokes. Never fold new text into `outbox[0]`: it may have been
+sent already, and a retry has to repeat it exactly.
+
+**The phone is told when words were not typed.** `Injector.TypeText` returns a `TypeResult`:
+`Typed`; `OwnWindow`, when the panel has the focus and nothing is sent; `NoWindow`, when no
+window has it (locked, asleep, or between windows); `Blocked`, when `SendInput` refuses every
+key, which is UIPI in front of an elevated window; or `Partial`. The send loop stops at the
+first short call, so the end of a sentence is never typed without its middle. `/speak`
+answers `{"ok":true,"typed":true}`, or `"typed":false` with a `reason` of `own-window`,
+`no-window`, `blocked` or `partial`. The page says why in `typeWarn` until a chunk types
+again, and strikes the line through in its transcript; the panel's status line and the tray
+tooltip carry the reason for 8 seconds, and `/status` counts `missed`. Before this, a
+refusal was a line in a log nobody was reading while the phone carried on as if it had
+worked. **Nothing untyped is retried:** the desktop types into whatever has the focus, so
+words held for later land in whichever window that turned out to be.
+
+**Only characters that type as themselves are sent.** `Bridge.Typeable` turns line breaks,
+tabs and the Unicode line and paragraph separators into one space, and drops the other C0
+and C1 controls, DEL and unpaired surrogates. `KEYEVENTF_UNICODE` sends a control character
+as a key, and programs act on it: a line feed is Enter, which sends a half-finished chat
+message. `Injector` types under a lock, because each request has its own thread and two
+chunks typed at once interleave their keys.
 
 **`interimResults = true` is deliberate.** Safari sometimes never sets `isFinal`. With
 final-only results you get no output at all, forever. This is also why interim text is

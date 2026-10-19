@@ -189,7 +189,9 @@ no longer trust.
 
 - The phone screen must stay on and unlocked.
 - It cannot type into a program running as **administrator**. Windows blocks synthetic
-  input across privilege levels, and the log says so when it happens.
+  input across privilege levels, and the phone tells you when that is what happened.
+- It types words, never keys: no Enter, no Tab, no Backspace. A line break in what the
+  phone sends becomes a space, because Enter sends a chat message or submits a form.
 - If your PC's IP address changes to one the certificate doesn't list, you'll reinstall
   the certificate once more. Usually rare, since most networks reissue the same address.
 - You need iOS 14.5 or newer. Chrome and Firefox on iOS work in theory, but Safari is
@@ -280,8 +282,12 @@ is already on screen. The page stops sending the rewrite and carries on, so one 
 does not turn into a wrong sentence.
 
 **Nothing appears in the target program.**
-Check it isn't running as administrator. Open `data\dictation-bridge.log` — it will say
-`SendInput sent 0/44` if that's the problem.
+The phone page says why as soon as it happens: the window in front is running as
+administrator, no window has the focus (the PC is locked or asleep), or the Dictation
+Bridge panel itself had the focus. Click into the window you want and say it again. Words
+that were not typed are struck through in the phone's transcript and are not sent again
+on their own, because they would land in whichever window had the focus by then. The
+panel's status line says the same for a few seconds.
 
 **The address changed and the certificate was replaced.**
 The panel will show a new address. Send the new `data\dictation-bridge.cer` to the phone

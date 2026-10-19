@@ -1012,63 +1012,89 @@ namespace DictationBridge
         }
     }
 
+    // What became of a chunk from the phone. The page is told, because words
+    // that were not typed are words somebody has to say again.
+    internal enum TypeResult
+    {
+        Typed,
+        // This app's own window had the focus. The keys would land in the
+        // panel, so nothing is sent.
+        OwnWindow,
+        // No window had the focus: the PC is locked, asleep, or between windows.
+        NoWindow,
+        // Windows dropped every key. A program running as administrator does
+        // that to an app that is not (UIPI).
+        Blocked,
+        // Some keys went in before Windows dropped the rest.
+        Partial
+    }
+
     internal static class Injector
     {
-        // appendSpace stays because it is still the right thing for a whole
-        // utterance, but the page no longer sends whole utterances: it streams every
-        // partial result the moment it appears, and a space appended to each chunk
-        // would double the spaces between words ("want" + "to" -> "want  to").
-        // The page owns spacing now, because only it knows where the recogniser put
-        // a boundary between two results.
-        public static void TypeText(string text, bool appendSpace)
+        // One chunk at a time. Requests arrive on their own threads, and two
+        // chunks typed at once would interleave their keys.
+        private static readonly object Gate = new object();
+
+        // No trailing space, and no option for one any more. The page streams
+        // every partial result the moment it appears and owns the spacing,
+        // because only it knows where the recogniser put a boundary; a space per
+        // chunk doubled the spaces between words ("want" + "to" -> "want  to").
+        public static TypeResult TypeText(string text)
         {
-            if (string.IsNullOrEmpty(text)) return;
+            if (string.IsNullOrEmpty(text)) return TypeResult.Typed;
+            lock (Gate)
+            {
+                IntPtr fg = Native.GetForegroundWindow();
+                if (fg == IntPtr.Zero)
+                {
+                    // It used to send anyway, and then blame an elevated window
+                    // for the keys going nowhere.
+                    Log.Quiet("SKIP: no window has the focus (locked, asleep, or switching)");
+                    return TypeResult.NoWindow;
+                }
+                uint pid;
+                Native.GetWindowThreadProcessId(fg, out pid);
+                if (pid == ProcessIdHelper.Current)
+                {
+                    Log.Quiet("SKIP: the Dictation Bridge window has the focus");
+                    return TypeResult.OwnWindow;
+                }
 
-            IntPtr fg = Native.GetForegroundWindow();
-            uint pid;
-            Native.GetWindowThreadProcessId(fg, out pid);
-            if (pid == (uint)ProcessIdHelper.Current)
-            {
-                Log.Write("SKIP: desktop window has focus");
-                return;
-            }
+                var buffer = new List<Native.INPUT>(text.Length * 2);
+                foreach (char c in text)
+                {
+                    // Surrogate halves go through individually; Windows reassembles them.
+                    buffer.Add(Unicode((ushort)c, false));
+                    buffer.Add(Unicode((ushort)c, true));
+                }
 
-            var buffer = new List<Native.INPUT>(text.Length * 2 + 2);
-            foreach (char c in text)
-            {
-                // Surrogate halves go through individually; Windows reassembles them.
-                buffer.Add(Unicode((ushort)c, false));
-                buffer.Add(Unicode((ushort)c, true));
-            }
-            if (appendSpace && !char.IsWhiteSpace(text[text.Length - 1]))
-            {
-                buffer.Add(Virtual(0x20, false));
-                buffer.Add(Virtual(0x20, true));
-            }
+                int size = Marshal.SizeOf(typeof(Native.INPUT));
+                uint sent = 0;
+                const int perCall = 64;
+                for (int i = 0; i < buffer.Count; i += perCall)
+                {
+                    int count = Math.Min(perCall, buffer.Count - i);
+                    var chunk = new Native.INPUT[count];
+                    buffer.CopyTo(i, chunk, 0, count);
+                    uint done = Native.SendInput((uint)count, chunk, size);
+                    sent += done;
+                    // Stop at the first refusal. Carrying on would type the end of
+                    // the sentence without its middle.
+                    if (done != count) break;
+                    Thread.Sleep(8);
+                }
 
-            int size = Marshal.SizeOf(typeof(Native.INPUT));
-            uint sent = 0;
-            const int perCall = 64;
-            for (int i = 0; i < buffer.Count; i += perCall)
-            {
-                int count = Math.Min(perCall, buffer.Count - i);
-                var chunk = new Native.INPUT[count];
-                buffer.CopyTo(i, chunk, 0, count);
-                sent += Native.SendInput((uint)count, chunk, size);
-                Thread.Sleep(8);
-            }
-
-            if (sent != buffer.Count)
-            {
+                if (sent == buffer.Count)
+                {
+                    // A count, not the words. The log is the file people are asked to
+                    // attach to bug reports, and it used to carry the start of every
+                    // sentence they had dictated.
+                    Log.Quiet("typed " + text.Length + " char" + (text.Length == 1 ? "" : "s"));
+                    return TypeResult.Typed;
+                }
                 Log.Write("WARN: SendInput sent " + sent + "/" + buffer.Count +
                           ". If the target app is elevated this is expected (UIPI blocks it).");
-            }
-            else
-            {
-                // A count, not the words. The log is the file people are asked to
-                // attach to bug reports, and it used to carry the start of every
-                // sentence they had dictated.
-                Log.Quiet("typed " + text.Length + " char" + (text.Length == 1 ? "" : "s"));
+                return sent == 0 ? TypeResult.Blocked : TypeResult.Partial;
             }
         }
 
@@ -1079,18 +1105,6 @@ namespace DictationBridge
             input.U.ki.wVk = 0;
             input.U.ki.wScan = ch;
             input.U.ki.dwFlags = Native.KEYEVENTF_UNICODE | (up ? Native.KEYEVENTF_KEYUP : 0);
-            input.U.ki.time = 0;
-            input.U.ki.dwExtraInfo = UIntPtr.Zero;
-            return input;
-        }
-
-        private static Native.INPUT Virtual(ushort vk, bool up)
-        {
-            var input = new Native.INPUT();
-            input.type = Native.INPUT_KEYBOARD;
-            input.U.ki.wVk = vk;
-            input.U.ki.wScan = 0;
-            input.U.ki.dwFlags = up ? Native.KEYEVENTF_KEYUP : 0;
             input.U.ki.time = 0;
             input.U.ki.dwExtraInfo = UIntPtr.Zero;
             return input;
@@ -1106,22 +1120,19 @@ namespace DictationBridge
     {
         private readonly object _gate = new object();
         private int _typedCount;
-        private string _lastTyped = "";
+        private int _missedCount;
         private string _recentTyped = "";
         private DateTime _lastSeen = DateTime.MinValue;
         private DateTime _lastRefused = DateTime.MinValue;
+        private TypeResult _lastMiss = TypeResult.Typed;
+        private DateTime _lastMissAt = DateTime.MinValue;
         private long _received;
 
-        // With plain HTTP there is no persistent connection, so "connected" means
-        // the phone polled recently.
+        // "Connected" means the phone polled recently. An open connection says
+        // nothing: one can outlive the page that opened it by a good while.
         public bool PhonePresent
         {
             get { lock (_gate) { return (DateTime.UtcNow - _lastSeen).TotalSeconds < 10; } }
-        }
-
-        public int Typed
-        {
-            get { lock (_gate) { return _typedCount; } }
         }
 
         // A rolling window rather than the last chunk. The phone streams partial
@@ -1133,9 +1144,43 @@ namespace DictationBridge
             get { lock (_gate) { return _recentTyped; } }
         }
 
-        public int Received
+        // A chunk went untyped in the last few seconds: what to tell the person
+        // at the PC, short enough for the panel's status line. Null otherwise.
+        public string RecentMiss
         {
-            get { lock (_gate) { return (int)_received; } }
+            get
+            {
+                lock (_gate)
+                {
+                    if ((DateTime.UtcNow - _lastMissAt).TotalSeconds >= 8) return null;
+                    return MissText(_lastMiss);
+                }
+            }
+        }
+
+        public static string MissText(TypeResult result)
+        {
+            switch (result)
+            {
+                case TypeResult.OwnWindow: return "not typed: this panel had focus";
+                case TypeResult.NoWindow: return "not typed: no window in focus";
+                case TypeResult.Blocked: return "not typed: window runs as admin";
+                case TypeResult.Partial: return "partly typed: Windows refused";
+                default: return null;
+            }
+        }
+
+        // What the page gets in the reply, so it can say why.
+        public static string ReasonCode(TypeResult result)
+        {
+            switch (result)
+            {
+                case TypeResult.OwnWindow: return "own-window";
+                case TypeResult.NoWindow: return "no-window";
+                case TypeResult.Blocked: return "blocked";
+                case TypeResult.Partial: return "partial";
+                default: return "typed";
+            }
         }
 
         // Something asked without the right pairing key in the last half
@@ -1178,11 +1223,18 @@ namespace DictationBridge
             RaiseChanged();
         }
 
-        // The newest chunk number typed for each page. A chunk can be typed and
-        // its reply still lost -- the Wi-Fi blinks, or the page stops waiting --
-        // and the page then sends it again, which used to type it twice. Bounded,
-        // because every load of the page brings a new id.
-        private readonly Dictionary<string, long> _lastChunk = new Dictionary<string, long>();
+        // The newest chunk number seen from each page, and what became of it. A
+        // chunk can be typed and its reply still lost -- the Wi-Fi blinks, or the
+        // page stops waiting -- and the page then sends it again, which used to
+        // type it twice. Bounded, because every load of the page brings a new id.
+        private sealed class Seen
+        {
+            public long Seq;
+            // Null until typing finishes.
+            public TypeResult? Result;
+        }
+
+        private readonly Dictionary<string, Seen> _seen = new Dictionary<string, Seen>();
         private const int MaxPages = 32;
 
         // There is no armed state and no buffer. The phone's Start button is the only
@@ -1192,58 +1244,100 @@ namespace DictationBridge
         // and it is the reason a phone left face-up on a desk could pick up room
         // noise without spraying it at whatever window you were working in.
         //
-        // False when this chunk was typed already. A chunk with no page or number
-        // is typed whatever it is.
-        public bool OnText(string text, string page, long seq)
+        // repeat is set for a chunk seen already, which is not typed again; the
+        // result is then what happened the first time, as far as is known. A chunk
+        // with no page or number is typed whatever it is.
+        public TypeResult OnText(string text, string page, long seq, out bool repeat)
         {
-            if (string.IsNullOrEmpty(text)) return true;
+            repeat = false;
+            Seen seen = null;
             lock (_gate)
             {
                 if (!string.IsNullOrEmpty(page) && seq > 0)
                 {
-                    long last;
-                    // Older numbers too: the page sends one chunk at a time, so a
-                    // number below the newest is a late copy of a try that timed out.
-                    if (_lastChunk.TryGetValue(page, out last) && seq <= last) return false;
-                    if (!_lastChunk.ContainsKey(page) && _lastChunk.Count >= MaxPages)
+                    Seen last;
+                    if (_seen.TryGetValue(page, out last) && seq <= last.Seq)
                     {
-                        _lastChunk.Clear();
+                        // Older numbers too: the page sends one chunk at a time, so
+                        // a number below the newest is a late copy of a try that
+                        // timed out, and nobody is waiting for its answer.
+                        repeat = true;
+                        return seq == last.Seq && last.Result.HasValue
+                            ? last.Result.Value : TypeResult.Typed;
                     }
+                    if (last == null && _seen.Count >= MaxPages) _seen.Clear();
                     // Marked before typing, not after: a chunk that fails partway
                     // is better lost than typed again over the part that made it.
-                    _lastChunk[page] = seq;
+                    seen = new Seen { Seq = seq };
+                    _seen[page] = seen;
                 }
                 _received++;
             }
 
-            // No trailing space: the page streams deltas and already carries the
-            // separator the recogniser implied. Adding one per chunk types a space
-            // between every word.
-            Injector.TypeText(text, false);
+            string keys = Typeable(text);
+            TypeResult result = keys.Length == 0 ? TypeResult.Typed : Injector.TypeText(keys);
             lock (_gate)
             {
-                _typedCount++;
-                _lastTyped = text;
-                _recentTyped += text;
-                // Keep the quote card a readable length rather than an ever-growing
-                // wall that the TextBox has to re-layout on every chunk.
-                if (_recentTyped.Length > 200)
+                if (seen != null) seen.Result = result;
+                if (result == TypeResult.Typed)
                 {
-                    _recentTyped = _recentTyped.Substring(_recentTyped.Length - 200);
+                    _typedCount++;
+                    _recentTyped += keys;
+                    // Keep the quote card a readable length rather than an
+                    // ever-growing wall that has to re-layout on every chunk.
+                    if (_recentTyped.Length > 200)
+                    {
+                        _recentTyped = _recentTyped.Substring(_recentTyped.Length - 200);
+                    }
+                }
+                else
+                {
+                    _missedCount++;
+                    _lastMiss = result;
+                    _lastMissAt = DateTime.UtcNow;
                 }
             }
             RaiseChanged();
-            return true;
+            return result;
         }
 
-        public int TypedCount
+        // Only characters that type as themselves. KEYEVENTF_UNICODE sends a
+        // control character as a key, and programs act on it: a carriage return
+        // or a line feed is Enter, which sends a half-finished chat message or
+        // submits a form; a tab moves the focus; a backspace deletes. Line breaks
+        // and tabs become a space, so the words either side stay apart, and the
+        // rest is dropped, with any surrogate that has lost its other half.
+        public static string Typeable(string text)
         {
-            get { lock (_gate) { return _typedCount; } }
-        }
-
-        public string LastTyped
-        {
-            get { lock (_gate) { return _lastTyped; } }
+            if (string.IsNullOrEmpty(text)) return "";
+            var sb = new StringBuilder(text.Length);
+            for (int i = 0; i < text.Length; i++)
+            {
+                char c = text[i];
+                if (c == '\r' && i + 1 < text.Length && text[i + 1] == '\n') continue;
+                if (c == '\r' || c == '\n' || c == '\t' || c == '\v' || c == '\f' ||
+                    c == '\u0085' || c == '\u2028' || c == '\u2029')
+                {
+                    sb.Append(' ');
+                }
+                else if (c < 0x20 || (c >= 0x7f && c <= 0x9f))
+                {
+                    continue;
+                }
+                else if (char.IsHighSurrogate(c))
+                {
+                    if (i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+                    {
+                        sb.Append(c).Append(text[i + 1]);
+                        i++;
+                    }
+                }
+                else if (!char.IsLowSurrogate(c))
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString();
         }
 
         // Counts only. The typed text itself used to ride along as "last", which
@@ -1252,15 +1346,18 @@ namespace DictationBridge
         public string StatusJson()
         {
             int typed;
+            int missed;
             bool present;
-            int received;
+            long received;
             lock (_gate)
             {
                 typed = _typedCount;
-                received = (int)_received;
+                missed = _missedCount;
+                received = _received;
                 present = (DateTime.UtcNow - _lastSeen).TotalSeconds < 10;
             }
             return "{\"typed\":" + typed +
+                   ",\"missed\":" + missed +
                    ",\"received\":" + received +
                    ",\"phone\":" + (present ? "true" : "false") + "}";
         }
@@ -1938,13 +2035,20 @@ namespace DictationBridge
                 {
                     seq = 0;
                 }
-                if (!bridge.OnText(spoken, page, seq))
+                bool repeat;
+                TypeResult result = bridge.OnText(spoken, page, seq, out repeat);
+                if (repeat)
                 {
                     Log.Quiet("chunk " + seq + " arrived again from " + request.Remote +
-                              "; typed once");
-                    return Json(200, "{\"ok\":true,\"dup\":true}");
+                              "; not typed again");
                 }
-                return Json(200, "{\"ok\":true}");
+                // "typed" says whether the words reached a window, and "reason"
+                // why not, so the phone can tell its user to say them again.
+                return Json(200, "{\"ok\":true,\"typed\":" +
+                                 (result == TypeResult.Typed ? "true" : "false") +
+                                 (result == TypeResult.Typed ? "" :
+                                     ",\"reason\":" + Bridge.Json(Bridge.ReasonCode(result))) +
+                                 (repeat ? ",\"dup\":true" : "") + "}");
             }
 
             // Written verbatim to a diagnostics file so a failure that only
@@ -3239,7 +3343,9 @@ namespace DictationBridge
 
             if (_phoneState != null)
             {
-                if (present) _phoneState.Set("listening on the phone", Skin.Good);
+                string miss = _bridge.RecentMiss;
+                if (miss != null) _phoneState.Set(miss, Skin.Warn);
+                else if (present) _phoneState.Set("listening on the phone", Skin.Good);
                 else if (_bridge.RecentlyRefused) _phoneState.Set("phone not paired: scan the QR code", Skin.Warn);
                 else if (!Pairing.Used) _phoneState.Set("scan the QR code to pair", Skin.Warn);
                 else _phoneState.Set("tap Start on the phone", Skin.Warn);
@@ -3385,7 +3491,9 @@ namespace DictationBridge
             // "typing" rather than "armed": the armed/buffered wording described a
             // gate that no longer exists. What the tooltip can honestly report is
             // whether the phone is still in touch.
-            string status = _bridge.PhonePresent ? "typing"
+            string miss = _bridge.RecentMiss;
+            string status = miss != null ? miss
+                : _bridge.PhonePresent ? "typing"
                 : _bridge.RecentlyRefused ? "phone not paired, scan the QR code"
                 : !Pairing.Used ? "scan the QR code to pair"
                 : "waiting for the phone";

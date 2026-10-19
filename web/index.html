@@ -61,7 +61,8 @@ button {
   }
   .tline { padding: 3px 0; border-bottom: 1px solid #23262b; word-break: break-word; }
   .tline:last-child { border-bottom: 0; }
-  .pending-line { color: #fdd663; }
+  .tline.miss .ttext { color: #9aa0a6; text-decoration: line-through; }
+  .tmiss { color: #f28b82; font-size: 12px; margin-left: 8px; white-space: nowrap; }
   input[type=checkbox] { width: 20px; height: 20px; }
   button { margin-top: 2px; }
   .diagout {
@@ -95,6 +96,7 @@ button {
 </div>
 
 <div class="warnbox" id="pairWarn" role="alert"></div>
+<div class="warnbox" id="typeWarn" role="alert"></div>
 <div class="warnbox" id="warn"></div>
   <div class="pendingbox" id="pending">
     <span id="pendingText"></span>
@@ -163,6 +165,7 @@ button {
     recLabel: document.getElementById('recLabel'),
     warn: document.getElementById('warn'),
     pairWarn: document.getElementById('pairWarn'),
+    typeWarn: document.getElementById('typeWarn'),
     start: document.getElementById('start'),
     stop: document.getElementById('stop'),
     final: document.getElementById('final'),
@@ -179,7 +182,7 @@ button {
     stats: document.getElementById('stats')
   };
 
-  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0, rewritesHeld: 0, retries: 0, repeats: 0, timeouts: 0 };
+  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0, rewritesHeld: 0, retries: 0, repeats: 0, timeouts: 0, missed: 0 };
   var wantRun = false;
   var history = [];
   var rec = null, lastEvent = 0, watchdog = null, restartTimer = null;
@@ -268,7 +271,7 @@ button {
       'posted to desktop <b>' + stats.sent + '</b><br>' +
       'retried <b>' + stats.retries + '</b>, already typed <b>' + stats.repeats + '</b><br>' +
       'waiting to send <b>' + outbox.length + '</b><br>' +
-      'typed on desktop <b>' + serverTyped + '</b><br>' +
+      'typed on desktop <b>' + serverTyped + '</b>, not typed <b>' + serverMissed + '</b><br>' +
       'recognizer errors <b>' + stats.errors + '</b><br>' +
       'session uptime <b>' + secs + 's</b>';
   }
@@ -489,9 +492,11 @@ button {
         if (reply && reply.dup) {
           // An earlier try got through and only its answer was lost.
           stats.repeats++;
-          note('send', 'chunk ' + chunk.seq + ' was already typed; not typed again');
+          note('send', 'chunk ' + chunk.seq + ' arrived twice; not typed again');
         }
-        pushLocal(chunk.text);
+        var typed = !reply || reply.typed !== false;
+        noteTyping(typed, typed ? '' : String(reply.reason || ''), chunk.seq);
+        pushLocal(chunk.text, typed ? '' : String(reply.reason || 'not-typed'));
         updatePending();
         flushOutbox();
       })
@@ -508,6 +513,34 @@ button {
       });
   }
 
+  // Words that reached the desktop but not a window. The phone is where the person
+  // is looking, so it says why here, and keeps saying it until a chunk goes through.
+  // Nothing is retried: the desktop types into whatever has the focus, and words
+  // held back for later would land in whichever window that turned out to be.
+  var MISS_TEXT = {
+    'blocked': 'The PC did not type that. The window in front is running as administrator, ' +
+      'and Windows does not let Dictation Bridge type into it. Click into another window, then say it again.',
+    'no-window': 'The PC did not type that: no window has the focus. The PC may be locked or asleep. ' +
+      'Click into the window you want, then say it again.',
+    'own-window': 'The PC did not type that: the Dictation Bridge panel had the focus. ' +
+      'Click into the window you want, then say it again.',
+    'partial': 'The PC typed only part of that: Windows stopped accepting keys partway through. ' +
+      'Check the window, then say the rest again.'
+  };
+  var lastMiss = '';
+
+  function noteTyping(typed, reason, seq) {
+    if (!typed) {
+      stats.missed++;
+      lastMiss = reason;
+      note('send', 'chunk ' + seq + ' not typed on the desktop: ' + (reason || 'unknown'));
+    }
+    var msg = typed ? '' : (MISS_TEXT[reason] ||
+      'The PC did not type that. Click into the window you want, then say it again.');
+    if (el.typeWarn.textContent !== msg) el.typeWarn.textContent = msg;
+    el.typeWarn.className = msg ? 'warnbox show' : 'warnbox';
+  }
+
   // Polls the desktop and drains anything queued while it was unreachable.
   // Always resolves: the loop below depends on it.
   function pollStatus() {
@@ -517,6 +550,7 @@ button {
       // arrives, and this page's Start button is the only on/off switch.
       el.typingState.textContent = 'straight into the focused window';
       serverTyped = s.typed;
+      serverMissed = s.missed || 0;
       flushOutbox();
     }).catch(function (e) {
       var status = e && e.status;
@@ -547,6 +581,7 @@ button {
   }
 
   var serverTyped = 0;
+  var serverMissed = 0;
 
   // ---- turning results into text to send ------------------------------------
 
@@ -753,12 +788,13 @@ button {
 
 
   // ---- local transcript ------------------------------------------------------
-  // One line per chunk, recorded when the desktop has confirmed it, so this list is
-  // a mirror of what was actually typed rather than of what was recognised. A
-  // mismatch between this and the desktop is the thing worth reporting.
+  // One line per chunk, recorded when the desktop has answered for it, so this list
+  // is a mirror of what was actually typed rather than of what was recognised. A
+  // chunk the desktop could not type stays in the list, struck through, so it can
+  // be said again. A mismatch between this and the desktop is worth reporting.
 
-  function pushLocal(text) {
-    history.push({ t: text, time: new Date() });
+  function pushLocal(text, miss) {
+    history.push({ t: text, time: new Date(), miss: miss || '' });
     if (history.length > 200) history.shift();
     renderHistory();
   }
@@ -768,14 +804,21 @@ button {
     el.transcript.textContent = '';
     for (var i = 0; i < rows.length; i++) {
       var line = document.createElement('div');
-      line.className = 'tline';
+      line.className = rows[i].miss ? 'tline miss' : 'tline';
       var stamp = document.createElement('span');
       stamp.className = 'ttime';
       stamp.textContent = rows[i].time.toTimeString().slice(0, 8);
       var body = document.createElement('span');
+      body.className = 'ttext';
       body.textContent = rows[i].t;
       line.appendChild(stamp);
       line.appendChild(body);
+      if (rows[i].miss) {
+        var tag = document.createElement('span');
+        tag.className = 'tmiss';
+        tag.textContent = rows[i].miss === 'partial' ? 'partly typed' : 'not typed';
+        line.appendChild(tag);
+      }
       el.transcript.appendChild(line);
     }
   }
@@ -947,6 +990,8 @@ button {
       retries: stats.retries,
       repeats: stats.repeats,
       timeouts: stats.timeouts,
+      missed: stats.missed,
+      lastMiss: lastMiss,
       page: PAGE_ID,
       streamed: stats.streamed,
       rewrites: stats.rewrites,

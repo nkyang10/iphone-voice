@@ -281,8 +281,10 @@ and install it again.
 Nothing types: check the Start button on the phone page is greyed out, which means the
 microphone is open and the page is sending, and that it says *connected to desktop*.
 
-Nothing appears in the target program: it may be running as administrator, which
-Windows blocks. `data\dictation-bridge.log` will say `SendInput sent 0/44`.
+Nothing appears in the target program: the phone page says why. Usually the window
+in front is running as administrator, which Windows does not let Dictation Bridge type
+into, or the PC is locked. Click into the window you want and say it again; words that
+were not typed are not sent again on their own.
 
 Still stuck: on the phone page tap Send to desktop, then read
 `data\diagnostics.log`. It records what the speech recogniser was doing.
