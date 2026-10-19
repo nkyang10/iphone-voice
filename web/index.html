@@ -179,7 +179,7 @@ button {
     stats: document.getElementById('stats')
   };
 
-  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0, rewritesHeld: 0 };
+  var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0, rewritesHeld: 0, retries: 0, repeats: 0, timeouts: 0 };
   var wantRun = false;
   var history = [];
   var rec = null, lastEvent = 0, watchdog = null, restartTimer = null;
@@ -266,6 +266,7 @@ button {
       'corrections caught in time <b>' + stats.rewritesHeld + '</b><br>' +
       'corrections too late <b>' + stats.rewrites + '</b><br>' +
       'posted to desktop <b>' + stats.sent + '</b><br>' +
+      'retried <b>' + stats.retries + '</b>, already typed <b>' + stats.repeats + '</b><br>' +
       'waiting to send <b>' + outbox.length + '</b><br>' +
       'typed on desktop <b>' + serverTyped + '</b><br>' +
       'recognizer errors <b>' + stats.errors + '</b><br>' +
@@ -326,16 +327,40 @@ button {
   // ---- transport ------------------------------------------------------------
   // Plain HTTP, same origin as the page. No handshake to get wrong, and the
   // desktop learns the phone is alive from the status poll.
+  //
+  // Every request has a deadline. iOS can leave a fetch hanging for a minute or
+  // more when the Wi-Fi drops, and the queue below sends one chunk at a time, so
+  // one hung request held up everything said after it. A request that runs out of
+  // time fails like any other, with status 0, and is retried from the queue.
+  var GET_TIMEOUT_MS = 5000;
+  var POST_TIMEOUT_MS = 8000;
+  var DIAG_TIMEOUT_MS = 15000;
 
-  function post(path, payload) {
+  function api(path, payload, timeoutMs) {
     var headers = {};
     if (payload) headers['Content-Type'] = 'application/json';
     if (pairKey) headers['X-Dictation-Key'] = pairKey;
-    return fetch(path, {
+    var ms = timeoutMs || (payload ? POST_TIMEOUT_MS : GET_TIMEOUT_MS);
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = null;
+    var deadline = new Promise(function (resolve, reject) {
+      timer = setTimeout(function () {
+        // Aborting frees the connection; the rejection below is what the caller
+        // sees, so it does not matter which of the two settles first.
+        if (ctrl) { try { ctrl.abort(); } catch (e) {} }
+        var err = new Error('timed out after ' + ms + 'ms');
+        err.status = 0;
+        err.timeout = true;
+        stats.timeouts++;
+        reject(err);
+      }, ms);
+    });
+    var request = fetch(path, {
       method: payload ? 'POST' : 'GET',
       headers: headers,
       body: payload ? JSON.stringify(payload) : undefined,
-      cache: 'no-store'
+      cache: 'no-store',
+      signal: ctrl ? ctrl.signal : undefined
     }).then(function (r) {
       if (!r.ok) {
         var err = new Error('http ' + r.status);
@@ -343,6 +368,13 @@ button {
         throw err;
       }
       return r.json();
+    });
+    return Promise.race([request, deadline]).then(function (value) {
+      clearTimeout(timer);
+      return value;
+    }, function (e) {
+      clearTimeout(timer);
+      throw e;
     });
   }
 
@@ -397,20 +429,46 @@ button {
   // whole point: an earlier chunk that failed has to land before a later one, or
   // the sentence arrives scrambled. The old code pushed failures onto a side list
   // and let the next chunk post immediately, which could reorder them.
+  //
+  // Each chunk carries this page's id and its own number, and keeps both through
+  // every retry. A chunk can be typed and its reply still lost -- the Wi-Fi blinks,
+  // or the request runs out of time on this end -- and the retry used to type it a
+  // second time. The desktop now types a number once and answers a repeat with
+  // "dup", which means it was already typed.
 
   var MAX_QUEUE = 60;
   var outbox = [];
   var flushing = false;
+  var chunkSeq = 0;
+
+  // Random, so a reloaded page or a second phone never shares a number sequence
+  // with another.
+  var PAGE_ID = (function () {
+    var bytes = [];
+    try {
+      var a = new Uint8Array(8);
+      window.crypto.getRandomValues(a);
+      for (var i = 0; i < a.length; i++) bytes.push(a[i]);
+    } catch (e) {
+      for (var j = 0; j < 8; j++) bytes.push(Math.floor(Math.random() * 256));
+    }
+    var hex = '';
+    for (var k = 0; k < bytes.length; k++) hex += (bytes[k] < 16 ? '0' : '') + bytes[k].toString(16);
+    return hex;
+  })();
 
   function enqueue(text) {
     if (!text) return;
     // A phone left talking with the desktop asleep would otherwise queue every
     // chunk until the tab died. Folding into the tail keeps both the text and its
     // order while capping the backlog; what is already queued is never dropped.
-    if (outbox.length >= MAX_QUEUE) {
-      outbox[outbox.length - 1] += text;
+    // Never into the head: that one may already have been sent, and a retry has
+    // to repeat it exactly or the desktop would take the extra text for a repeat.
+    if (outbox.length >= MAX_QUEUE && outbox.length > 1) {
+      outbox[outbox.length - 1].text += text;
     } else {
-      outbox.push(text);
+      chunkSeq++;
+      outbox.push({ seq: chunkSeq, text: text, tries: 0 });
     }
     typedTail = text.charAt(text.length - 1);
     updatePending();
@@ -421,12 +479,19 @@ button {
     if (flushing || outbox.length === 0) return;
     flushing = true;
     var chunk = outbox[0];
-    post('/speak', { text: chunk })
-      .then(function () {
+    chunk.tries++;
+    if (chunk.tries > 1) stats.retries++;
+    api('/speak', { page: PAGE_ID, seq: chunk.seq, text: chunk.text })
+      .then(function (reply) {
         outbox.shift();
         flushing = false;
         stats.sent++;
-        pushLocal(chunk);
+        if (reply && reply.dup) {
+          // An earlier try got through and only its answer was lost.
+          stats.repeats++;
+          note('send', 'chunk ' + chunk.seq + ' was already typed; not typed again');
+        }
+        pushLocal(chunk.text);
         updatePending();
         flushOutbox();
       })
@@ -436,13 +501,17 @@ button {
         // has to be paired again first.
         flushing = false;
         if (e && e.status === 401) setLink('unpaired');
+        if (chunk.tries === 1 || chunk.tries % 10 === 0) {
+          note('send', 'chunk ' + chunk.seq + ' not sent (try ' + chunk.tries + '): ' +
+            (e && e.message ? e.message : 'failed'));
+        }
       });
   }
 
   // Polls the desktop and drains anything queued while it was unreachable.
   // Always resolves: the loop below depends on it.
   function pollStatus() {
-    return post('/status').then(function (s) {
+    return api('/status').then(function (s) {
       setLink('ok');
       // There is no armed flag to read any more: the desktop types whatever
       // arrives, and this page's Start button is the only on/off switch.
@@ -735,11 +804,7 @@ button {
   // desktop what it is serving and reload when it differs. At boot the answer
   // is only recorded: this copy has just been fetched.
   function checkVersion(atBoot) {
-    return fetch('/config', { cache: 'no-store' })
-      .then(function (r) {
-        if (!r.ok) throw new Error('http ' + r.status);
-        return r.json();
-      })
+    return api('/config')
       .then(function (cfg) {
         if (!cfg || !cfg.version) return;
         var known = null;
@@ -879,6 +944,10 @@ button {
       heard: stats.heard,
       deaf: stats.deaf,
       sent: stats.sent,
+      retries: stats.retries,
+      repeats: stats.repeats,
+      timeouts: stats.timeouts,
+      page: PAGE_ID,
       streamed: stats.streamed,
       rewrites: stats.rewrites,
       rewritesHeld: stats.rewritesHeld,
@@ -1414,7 +1483,8 @@ button {
     versionCheck: checkVersion,
     stats: function () { return stats; },
     transcript: function () { return history.slice(); },
-    queued: function () { return outbox.slice(); },
+    queued: function () { return outbox.map(function (c) { return c.text; }); },
+    pageId: function () { return PAGE_ID; },
     link: function () { return link; },
     paired: function () { return !!pairKey; },
     button: function () {
@@ -1499,7 +1569,7 @@ button {
 
   el.diagSend.addEventListener('click', function () {
     note('ui', 'manual report send');
-    post('/diag', sendableReport()).then(function () {
+    api('/diag', sendableReport(), DIAG_TIMEOUT_MS).then(function () {
       el.diagSend.textContent = 'Sent - see desktop log';
     }).catch(function (e) {
       el.diagSend.textContent = e.status === 401
@@ -1572,7 +1642,7 @@ button {
     if (Date.now() - lastReport < 45000) return;
     lastReport = Date.now();
     note('auto', 'reporting: errors with nothing heard');
-    post('/diag', sendableReport()).catch(function () { });
+    api('/diag', sendableReport(), DIAG_TIMEOUT_MS).catch(function () { });
   }, 20000);
 })();
 </script>

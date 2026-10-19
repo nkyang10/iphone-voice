@@ -234,6 +234,24 @@ accepted TLS on the HTTP port while rejecting the identical certificate on a sec
 Node trims it, so every Node test passed while the browser failed. HTTP has no handshake
 to get wrong.
 
+**Connections stay open, and nothing waits for ever.** The server answers many requests on
+one connection (`Connection: keep-alive`, `Keep-Alive: timeout=15`). It used to close after
+every reply, so each chunk of speech paid for a new TCP and TLS handshake first. Every
+connection has a 20-second receive timeout, the TLS handshake included, and at most 64 are
+open at once; before that, anything that connected and said nothing held a thread until
+the app quit. Keep the advertised timeout below the real one, so the browser retires an
+idle connection before the server closes it under a request. On the page, `api()` gives
+every request a deadline (5 s for a GET, 8 s for a POST, 15 s for a report): iOS can leave
+a fetch hanging for a minute, and the outbox sends one chunk at a time.
+
+**A chunk is typed at most once.** Each `/speak` carries `page`, random for each load of the
+page, and `seq`, one per chunk and kept across retries. The desktop types a number once and
+answers a repeat, or anything older, with `{"ok":true,"dup":true}`. A reply lost after the
+desktop had typed used to make the retry type it twice. The number is recorded before typing,
+so a failure partway loses text rather than repeating it, which is the right way round for
+keystrokes. Never fold new text into `outbox[0]`: it may have been sent already, and a retry
+has to repeat it exactly.
+
 **`interimResults = true` is deliberate.** Safari sometimes never sets `isFinal`. With
 final-only results you get no output at all, forever. This is also why interim text is
 sent rather than held: the interim path was originally local-only, so an utterance Safari
@@ -252,11 +270,12 @@ removed.
 stops with a visible message. The original code retried the same rejected code silently,
 which presented as "nothing heard, no error".
 
-**Logging escapes non-ASCII.** `Bridge.Describe` writes `\uXXXX`. The log is read in
-consoles with arbitrary code pages, and a raw Cantonese string gets mangled there even
-though the buffer and the injected text are correct. Keep the exact text where it
-matters, escape it only for display. `crash.txt` is the deliberate exception: it is read
-in Notepad and attached to a report, so it keeps raw UTF-8.
+**Logging escapes non-ASCII, and never holds what was said.** Every line goes through
+`Log.Escape`, which writes `\uXXXX`: the log is read in consoles with arbitrary code pages,
+and a raw Cantonese string gets mangled there even though the injected text is correct.
+Dictated text is not logged at all, only how many characters were typed, because the log
+is what gets attached to a bug report. `crash.txt` is the deliberate exception to the
+escaping: it is read in Notepad and attached to a report, so it keeps raw UTF-8.
 
 **The app can die with nothing to show for it, because it is a `winexe`.** `/target:winexe`
 means there is no console when a user double-clicks the exe, so every `Console.WriteLine`

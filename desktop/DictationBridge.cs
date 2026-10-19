@@ -997,8 +997,7 @@ namespace DictationBridge
         }
 
         // Non-ASCII becomes \uXXXX so the file survives any console code page.
-        // Same rule as Bridge.Describe, applied to everything that is not
-        // dictation text.
+        // Dictation text never gets this far: only its length is logged.
         private static string Escape(string text)
         {
             if (text == null) return "";
@@ -1179,17 +1178,41 @@ namespace DictationBridge
             RaiseChanged();
         }
 
+        // The newest chunk number typed for each page. A chunk can be typed and
+        // its reply still lost -- the Wi-Fi blinks, or the page stops waiting --
+        // and the page then sends it again, which used to type it twice. Bounded,
+        // because every load of the page brings a new id.
+        private readonly Dictionary<string, long> _lastChunk = new Dictionary<string, long>();
+        private const int MaxPages = 32;
+
         // There is no armed state and no buffer. The phone's Start button is the only
         // on/off switch: while the page is listening it sends, and whatever it
         // sends is typed straight into the focused window. That used to be gated
         // by a desktop toggle as well, which was a second gate for one decision --
         // and it is the reason a phone left face-up on a desk could pick up room
         // noise without spraying it at whatever window you were working in.
-        public void OnText(string text)
+        //
+        // False when this chunk was typed already. A chunk with no page or number
+        // is typed whatever it is.
+        public bool OnText(string text, string page, long seq)
         {
-            if (string.IsNullOrEmpty(text)) return;
+            if (string.IsNullOrEmpty(text)) return true;
             lock (_gate)
             {
+                if (!string.IsNullOrEmpty(page) && seq > 0)
+                {
+                    long last;
+                    // Older numbers too: the page sends one chunk at a time, so a
+                    // number below the newest is a late copy of a try that timed out.
+                    if (_lastChunk.TryGetValue(page, out last) && seq <= last) return false;
+                    if (!_lastChunk.ContainsKey(page) && _lastChunk.Count >= MaxPages)
+                    {
+                        _lastChunk.Clear();
+                    }
+                    // Marked before typing, not after: a chunk that fails partway
+                    // is better lost than typed again over the part that made it.
+                    _lastChunk[page] = seq;
+                }
                 _received++;
             }
 
@@ -1210,6 +1233,7 @@ namespace DictationBridge
                 }
             }
             RaiseChanged();
+            return true;
         }
 
         public int TypedCount
@@ -1469,6 +1493,24 @@ namespace DictationBridge
             return true;
         }
 
+        // How long a connection may go without sending a byte, the TLS handshake
+        // included. There was no limit at all: anything that connected and said
+        // nothing, or a phone that left the Wi-Fi halfway through a request, held
+        // its thread until the app quit.
+        private const int ReceiveMs = 20000;
+        private const int SendMs = 10000;
+        // What replies tell the browser. Shorter than ReceiveMs on purpose: a
+        // browser that honours it retires an idle connection before this end
+        // closes it, and closing first is the race that costs a request -- the
+        // browser sends on a connection the server is in the middle of hanging up.
+        private const int KeepAliveSeconds = 15;
+        private const int MaxRequestsPerConnection = 1000;
+        // A thread per connection is right for one phone, which opens two or
+        // three. It is wrong for anything that opens thousands, so past this many
+        // a new connection is closed as it arrives.
+        private const int MaxConnections = 64;
+        private static int _open;
+
         private static void Accept(TcpListener listener, Bridge bridge, X509Certificate2 cert)
         {
             new Thread(() =>
@@ -1489,10 +1531,27 @@ namespace DictationBridge
                         }
                         break;
                     }
-                    new Thread(() => Handle(client, bridge, cert))
-                    { IsBackground = true }.Start();
+                    if (Interlocked.Increment(ref _open) > MaxConnections)
+                    {
+                        Interlocked.Decrement(ref _open);
+                        Log.Quiet("closed a new connection from " + RemoteOf(client) + ": " +
+                                  MaxConnections + " are open already");
+                        try { client.Close(); } catch (Exception) { }
+                        continue;
+                    }
+                    new Thread(() =>
+                    {
+                        try { Handle(client, bridge, cert); }
+                        finally { Interlocked.Decrement(ref _open); }
+                    }) { IsBackground = true }.Start();
                 }
             }) { IsBackground = true }.Start();
+        }
+
+        private static string RemoteOf(TcpClient client)
+        {
+            try { return Host(client.Client.RemoteEndPoint.ToString()); }
+            catch (Exception) { return "an unknown address"; }
         }
 
         // The page sends the pairing key in this header on every request. A
@@ -1508,7 +1567,10 @@ namespace DictationBridge
         {
             public string Method = "";
             public string Path = "/";
+            public string Version = "HTTP/1.0";
             public string Remote = "";
+            // Whether the client will send another request on this connection.
+            public bool KeepAlive;
             public byte[] Body = new byte[0];
             public readonly Dictionary<string, string> Headers =
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1556,13 +1618,31 @@ namespace DictationBridge
             return reply;
         }
 
+        // A connection's stream, and whatever arrived past the end of the last
+        // request. Browsers do not pipeline, but one read can still return the
+        // start of the next request along with the end of this one, and those
+        // bytes belong to it.
+        private sealed class Wire
+        {
+            public Stream Stream;
+            public byte[] Carry = new byte[0];
+            // From the first byte of a request to its last, so a connection that
+            // dropped partway through can be told from an idle one closing.
+            public bool MidRequest;
+        }
+
         private static void Handle(TcpClient client, Bridge bridge, X509Certificate2 cert)
         {
             Stream stream = null;
+            var wire = new Wire();
+            string remote = RemoteOf(client);
             try
             {
                 client.NoDelay = true;
-                string remote = Host(client.Client.RemoteEndPoint.ToString());
+                // Before the handshake, so a client that connects and never says
+                // hello cannot hold the thread either.
+                client.ReceiveTimeout = ReceiveMs;
+                client.SendTimeout = SendMs;
                 stream = client.GetStream();
                 if (cert != null)
                 {
@@ -1575,24 +1655,67 @@ namespace DictationBridge
                     }
                     catch (Exception e)
                     {
-                        Log.Write("TLS failed from " + remote + ": " + e.Message);
+                        // Quiet: a phone that locks mid-handshake, or a scanner
+                        // that connects and leaves, repeats this line exactly.
+                        Log.Quiet("TLS failed from " + remote + ": " + e.Message);
                         return;
                     }
                 }
+                wire.Stream = stream;
+                string scheme = cert != null ? "https" : "http";
 
-                Reply reply;
-                Request request = ReadRequest(stream, remote, out reply);
-                if (request != null)
+                // Many requests to a connection. It used to close after every
+                // reply, so each chunk of speech paid for a fresh TCP and TLS
+                // handshake: several round trips on a phone's Wi-Fi before its
+                // first character could be typed.
+                for (int served = 1; ; served++)
                 {
+                    Reply reply;
+                    Request request = ReadRequest(wire, out reply);
+                    if (request == null)
+                    {
+                        // Refused before it was read in full, so the rest of it may
+                        // still be on its way and the connection cannot be reused.
+                        if (reply != null) Send(stream, reply, false);
+                        else if (wire.MidRequest)
+                        {
+                            Log.Quiet("connection from " + remote + " ended mid-request");
+                        }
+                        return;
+                    }
+                    request.Remote = remote;
+
                     // Quiet, not Write: the phone polls /status every second or
                     // two and those repeats would bury the startup and crash
                     // lines. The client's ephemeral port is left out, or nothing
                     // would ever match and nothing would be suppressed.
                     Log.Quiet(request.Method + " " + request.Path + " from " + remote +
                               " body=" + request.Body.Length);
-                    reply = Route(request, bridge, cert != null ? "https" : "http");
+                    try
+                    {
+                        reply = Route(request, bridge, scheme);
+                    }
+                    catch (Exception e)
+                    {
+                        // Answered, not dropped. A dropped request is one the page
+                        // sends again, and this one may have got partway.
+                        Log.Detail(request.Method + " " + request.Path + " failed", e);
+                        reply = Error(500, "failed");
+                    }
+                    bool keep = request.KeepAlive && served < MaxRequestsPerConnection;
+                    Send(stream, reply, keep);
+                    if (!keep) return;
                 }
-                if (reply != null) Send(stream, reply);
+            }
+            catch (IOException e)
+            {
+                // How a connection usually ends, now that it outlives a request:
+                // the phone locked, left the Wi-Fi, or said nothing for ReceiveMs.
+                // Worth a line only when it cut a request short.
+                if (wire.MidRequest)
+                {
+                    Log.Quiet("connection from " + remote + " dropped mid-request: " + e.Message);
+                }
             }
             catch (Exception e)
             {
@@ -1610,38 +1733,31 @@ namespace DictationBridge
             }
         }
 
-        // One request off the stream. Null with no reply when the connection
-        // ended or sent something not worth answering; null with a reply when
-        // it is worth telling what was wrong.
-        private static Request ReadRequest(Stream stream, string remote, out Reply refusal)
+        // One request off the connection. Null with no reply when the connection
+        // ended or sent something not worth answering; null with a reply when it
+        // is worth saying what was wrong, after which the connection is closed.
+        private static Request ReadRequest(Wire wire, out Reply refusal)
         {
             refusal = null;
             var received = new MemoryStream();
+            received.Write(wire.Carry, 0, wire.Carry.Length);
+            wire.Carry = new byte[0];
+            wire.MidRequest = received.Length > 0;
             var chunk = new byte[4096];
-            int headEnd = -1;
-            int scanFrom = 3;
+            int headEnd = FindHeadEnd(received.GetBuffer(), (int)received.Length, 0);
             while (headEnd < 0)
             {
-                int n = stream.Read(chunk, 0, chunk.Length);
-                if (n <= 0) return null;
-                received.Write(chunk, 0, n);
-
-                byte[] data = received.GetBuffer();
-                int length = (int)received.Length;
-                // From just before the new bytes, so a terminator split across
-                // two reads is still found.
-                for (int i = scanFrom; i < length; i++)
+                if (received.Length > MaxHead)
                 {
-                    if (data[i - 3] == 13 && data[i - 2] == 10 &&
-                        data[i - 1] == 13 && data[i] == 10)
-                    {
-                        // i is the index of the final \n.
-                        headEnd = i + 1;
-                        break;
-                    }
+                    refusal = Error(431, "head-too-large");
+                    return null;
                 }
-                scanFrom = Math.Max(3, length);
-                if (headEnd < 0 && length > MaxHead) return null;
+                int n = wire.Stream.Read(chunk, 0, chunk.Length);
+                if (n <= 0) return null;
+                wire.MidRequest = true;
+                int from = (int)received.Length;
+                received.Write(chunk, 0, n);
+                headEnd = FindHeadEnd(received.GetBuffer(), (int)received.Length, from);
             }
 
             byte[] all = received.ToArray();
@@ -1655,11 +1771,11 @@ namespace DictationBridge
             }
 
             var request = new Request();
-            request.Remote = remote;
             request.Method = first[0];
             string target = first[1];
             int query = target.IndexOf('?');
             request.Path = query >= 0 ? target.Substring(0, query) : target;
+            if (first.Length >= 3) request.Version = first[2];
             for (int i = 1; i < lines.Length; i++)
             {
                 int colon = lines[i].IndexOf(':');
@@ -1673,6 +1789,7 @@ namespace DictationBridge
                     request.Headers[name] = lines[i].Substring(colon + 1).Trim();
                 }
             }
+            request.KeepAlive = KeepsAlive(request);
 
             // Chunked bodies are not supported. Browsers never send one for a
             // fetch with a string body, and reading it as empty -- which is
@@ -1702,14 +1819,53 @@ namespace DictationBridge
             body.Write(all, headEnd, all.Length - headEnd);
             while (body.Length < want)
             {
-                int n = stream.Read(chunk, 0, chunk.Length);
+                int n = wire.Stream.Read(chunk, 0, chunk.Length);
                 if (n <= 0) return null;
                 body.Write(chunk, 0, n);
             }
+            byte[] buffer = body.GetBuffer();
             byte[] bytes = new byte[want];
-            Array.Copy(body.GetBuffer(), bytes, want);
+            Array.Copy(buffer, bytes, want);
             request.Body = bytes;
+            // Anything past the body is the start of the next request.
+            int extra = (int)body.Length - want;
+            if (extra > 0)
+            {
+                wire.Carry = new byte[extra];
+                Array.Copy(buffer, want, wire.Carry, 0, extra);
+            }
+            wire.MidRequest = false;
             return request;
+        }
+
+        // Just past the blank line that ends a request head, or -1. Scans from
+        // a little before the newest bytes, so a terminator split across two
+        // reads is still found.
+        private static int FindHeadEnd(byte[] data, int length, int from)
+        {
+            for (int i = Math.Max(3, from); i < length; i++)
+            {
+                if (data[i] == 10 && data[i - 1] == 13 && data[i - 2] == 10 && data[i - 3] == 13)
+                {
+                    return i + 1;
+                }
+            }
+            return -1;
+        }
+
+        // HTTP/1.1 keeps a connection open unless told to close it; 1.0 closes
+        // it unless asked to keep it.
+        private static bool KeepsAlive(Request request)
+        {
+            bool close = false, keep = false;
+            foreach (string token in (request.Header("Connection") ?? "").Split(','))
+            {
+                string option = token.Trim();
+                if (option.Equals("close", StringComparison.OrdinalIgnoreCase)) close = true;
+                if (option.Equals("keep-alive", StringComparison.OrdinalIgnoreCase)) keep = true;
+            }
+            if (close) return false;
+            return request.Version == "HTTP/1.1" || keep;
         }
 
         private static Reply Route(Request request, Bridge bridge, string scheme)
@@ -1768,9 +1924,26 @@ namespace DictationBridge
             }
             if (speak)
             {
-                string spoken = Extract(request.BodyText(), "text");
+                string body = request.BodyText();
+                string spoken = Extract(body, "text");
                 if (spoken == null) return Error(400, "no-text");
-                bridge.OnText(spoken);
+                // Which page sent it and its number there, so a chunk sent again
+                // after a lost reply is recognised rather than typed twice.
+                string page = Extract(body, "page");
+                if (page != null && page.Length > 64) page = page.Substring(0, 64);
+                long seq;
+                if (!long.TryParse(Extract(body, "seq") ?? "",
+                        System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out seq))
+                {
+                    seq = 0;
+                }
+                if (!bridge.OnText(spoken, page, seq))
+                {
+                    Log.Quiet("chunk " + seq + " arrived again from " + request.Remote +
+                              "; typed once");
+                    return Json(200, "{\"ok\":true,\"dup\":true}");
+                }
                 return Json(200, "{\"ok\":true}");
             }
 
@@ -1933,7 +2106,7 @@ namespace DictationBridge
             }
         }
 
-        private static void Send(Stream stream, Reply reply)
+        private static void Send(Stream stream, Reply reply, bool keep)
         {
             byte[] payload = Encoding.UTF8.GetBytes(reply.Body ?? "");
             var head = new StringBuilder();
@@ -1956,11 +2129,17 @@ namespace DictationBridge
             head.Append("X-Content-Type-Options: nosniff\r\n");
             head.Append("Referrer-Policy: no-referrer\r\n");
             head.Append(reply.Headers);
-            head.Append("Connection: close\r\n\r\n");
+            head.Append(keep
+                ? "Connection: keep-alive\r\nKeep-Alive: timeout=" + KeepAliveSeconds + "\r\n\r\n"
+                : "Connection: close\r\n\r\n");
 
+            // One write, so a small reply goes out as one TLS record rather than
+            // two: every status poll is one of these.
             byte[] headBytes = Encoding.ASCII.GetBytes(head.ToString());
-            stream.Write(headBytes, 0, headBytes.Length);
-            if (payload.Length > 0) stream.Write(payload, 0, payload.Length);
+            var whole = new byte[headBytes.Length + payload.Length];
+            Buffer.BlockCopy(headBytes, 0, whole, 0, headBytes.Length);
+            Buffer.BlockCopy(payload, 0, whole, headBytes.Length, payload.Length);
+            stream.Write(whole, 0, whole.Length);
             stream.Flush();
         }
 
@@ -1979,6 +2158,8 @@ namespace DictationBridge
                 case 413: return "Payload Too Large";
                 case 415: return "Unsupported Media Type";
                 case 429: return "Too Many Requests";
+                case 431: return "Request Header Fields Too Large";
+                case 500: return "Internal Server Error";
                 case 503: return "Service Unavailable";
                 default: return "Error";
             }
