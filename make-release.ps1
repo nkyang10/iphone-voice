@@ -260,8 +260,13 @@ so that iOS can still correct itself. Most mishearings therefore never reach the
 correction that lands further back than that cannot be undone: the word stays wrong, but it
 is not typed twice and the sentence continues in order.
 
-Before first real use, set Settings > Display & Brightness > Auto-Lock to Never on the
-phone. A locked screen stops dictation.
+A locked screen stops dictation. While the page is listening it keeps the phone's screen
+on (iOS 16.4 or newer), and lets it lock again when you tap Stop. If the screen still
+locks while you dictate, set Settings > Display & Brightness > Auto-Lock to Never.
+
+When you update the app, a phone that has the page open loads the new page by itself. If
+it is listening at that moment, it says so and waits for you to tap Stop, so nothing you
+are saying is cut off.
 
 Cantonese or Chinese: pick it from the dropdown on the phone page. Cantonese is the
 default. If your iPhone rejects a language the page tries the next one and tells you

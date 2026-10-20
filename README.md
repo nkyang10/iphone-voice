@@ -3,7 +3,7 @@
 **Talk on your iPhone. The words appear in whatever window your Windows PC has focused.**
 
 No typing, no leaning over the keyboard, no stopping what you're doing. Hold the phone,
-press one key on the PC, and speak.
+tap Start listening, and speak.
 
 ![The Dictation Bridge panel](docs/panel-expanded.png)
 

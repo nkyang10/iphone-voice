@@ -2,7 +2,7 @@
 
 **用 iPhone 講嘢，字就係出現喺 Windows 電腦 focus 嗰個視窗。**
 
-唔使打字，唔使湊去鍵盤，唔使停低手上做緊嘅嘢。部電話拎住、撳一個鍵、講嘢就得。
+唔使打字，唔使湊去鍵盤，唔使停低手上做緊嘅嘢。部電話拎住、撳一下 Start listening、講嘢就得。
 
 ![Dictation Bridge 面板](docs/panel-expanded.png)
 

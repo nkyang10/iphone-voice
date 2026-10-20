@@ -2,7 +2,7 @@
 
 **在 iPhone 上说话，字就出现在 Windows 电脑当前聚焦的窗口里。**
 
-不用打字，不用凑到键盘，不用停下手上的事。拿着手机，按一个键，说就行。
+不用打字，不用凑到键盘，不用停下手上的事。拿着手机，点一下 Start listening，说就行。
 
 ![Dictation Bridge 面板](docs/panel-expanded.png)
 
