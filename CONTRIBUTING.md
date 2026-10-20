@@ -81,8 +81,9 @@ img = cv2.imread(r"docs/panel-expanded.png")
 print(cv2.QRCodeDetector().detectAndDecode(img)[0])
 ```
 
-The crop must match `https://<ip>:<port>/` as printed on startup. If OpenCV cannot read
-it, the phone will not either. `make-release.ps1` at least checks the encoder is present
+The crop must decode to the pairing link, `https://<ip>:<port>/#k=<key>`, with the address
+printed on startup and the key in `pairing-key.txt`. If OpenCV cannot read it, the phone
+will not either. `make-release.ps1` at least checks the encoder is present
 in the binary, which catches a release built without the vendored source.
 
 ## Release

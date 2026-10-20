@@ -250,9 +250,18 @@ button {
   //
   // The label never changes. It stays the word you already know how to find; the
   // dot and status line above carry the detail.
+  // Every poll tells the panel on the PC whether this page is listening. When
+  // that changes, poll now rather than at the next tick, so the panel's dot
+  // follows the Start and Stop buttons instead of trailing them by a second.
+  var reportedRun = null;
+
   function syncStartButton() {
     el.start.disabled = wantRun;
     el.stop.disabled = !wantRun;
+    if (reportedRun !== wantRun) {
+      reportedRun = wantRun;
+      pollLoop();
+    }
   }
 
   function renderStats() {
@@ -339,10 +348,13 @@ button {
   var POST_TIMEOUT_MS = 8000;
   var DIAG_TIMEOUT_MS = 15000;
 
-  function api(path, payload, timeoutMs) {
+  // state goes on the status poll, so the panel on the PC can say whether this
+  // page is listening rather than only that it is open.
+  function api(path, payload, timeoutMs, state) {
     var headers = {};
     if (payload) headers['Content-Type'] = 'application/json';
     if (pairKey) headers['X-Dictation-Key'] = pairKey;
+    if (state) headers['X-Dictation-State'] = state;
     var ms = timeoutMs || (payload ? POST_TIMEOUT_MS : GET_TIMEOUT_MS);
     var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
     var timer = null;
@@ -544,7 +556,7 @@ button {
   // Polls the desktop and drains anything queued while it was unreachable.
   // Always resolves: the loop below depends on it.
   function pollStatus() {
-    return api('/status').then(function (s) {
+    return api('/status', null, 0, wantRun ? 'listening' : 'idle').then(function (s) {
       setLink('ok');
       // There is no armed flag to read any more: the desktop types whatever
       // arrives, and this page's Start button is the only on/off switch.

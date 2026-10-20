@@ -239,12 +239,13 @@ window you are working in, a word at a time as you say it, not after you finish.
 | | |
 | --- | --- |
 | Start / stop typing | Start listening, on the phone page |
-| Know if it is working | The Start button is greyed out while it is |
+| Know if it is working | The Start button is greyed out while it is, and the panel's dot breathes green |
 | Stop typing | Tap Stop on the phone page |
 | Anything else | Right-click the panel, or the tray icon -- same menu |
 | Open the page on the phone | Scan the QR code in the panel. It pairs the phone too |
 | Unpair every phone | Right-click the panel, Reset phone pairing..., scan the new code |
-| Get the panel back | Click the tray icon, bottom right |
+| Put the panel away | Right-click it, Hide the panel. Click the tray icon to get it back |
+| Click the panel while you talk | Fine: it never takes the focus from your window |
 | Move it | Drag it. It remembers where you left it |
 | Port already in use | Run `DictationBridge.exe --port 8099` |
 

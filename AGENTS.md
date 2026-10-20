@@ -80,9 +80,42 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   second vendored library without the same argument, and prefer `vendor/` over a
   package reference so the build keeps working offline with the shipped `csc.exe`.
 - The desktop UI is a borderless `TopMost` form, not a normal window:
-  `FormBorderStyle.None` and `ShowInTaskbar = false`, with a one-pixel transparent
-  shadow panel so the edge is not invisible. Keep it that way; a caption or a
+  `FormBorderStyle.None` and `ShowInTaskbar = false`, with a one-pixel edge in
+  `Skin.ShadowEdge` so the edge is not invisible. Keep it that way; a caption or a
   taskbar button defeats the point of a floating helper.
+- **The panel never takes the focus.** Words go to whichever window has the focus,
+  and the panel is the one window they are refused for (`OwnWindow`), so a click on
+  it used to stop dictation until the user clicked back into their document. Four
+  things hold it off, and each one covers a hole the others leave:
+  `WS_EX_NOACTIVATE` in `CreateParams`, `WM_MOUSEACTIVATE` answered with
+  `MA_NOACTIVATE`, `ShowWithoutActivation`, and `ShowQuietly`, which raises it with
+  `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)` instead of `Show()` plus `Activate()`.
+  Every control on it is custom-painted with `ControlStyles.Selectable` off and
+  `TabStop = false`; a stock `Button` or `TextBox` takes the focus on a click, which is
+  why the quote is `PaintQuote` and not a read-only `TextBox`. The `ToolTip` needs
+  `ShowAlways`, or tips show only on the active window, which the panel never is.
+- The menu is the one exception. `ShowMenu` brings the panel forward first, because a
+  menu on a window that is not in front does not close on a click elsewhere, and hands
+  the focus back to the window it came from when the menu closes. An item that opens a
+  window of its own (the log in Explorer, the reset prompt) or ends the app carries
+  `Tag = MainForm.KeepsFocus`, so nothing snatches the focus back from it. Inside
+  `TrayContext` the name has to be written `DictationBridge.MainForm`, because
+  `MainForm` there resolves to `ApplicationContext.MainForm`.
+- `PanelStatus.Of(bridge)` is the only place that decides what the strip, the lamp,
+  the tray icon's colour and the tray tooltip say. Add a state there, never in a second
+  `switch`. They used to be worked out in two places, which said different things
+  ("listening on the phone" on the strip, "typing" in the tray) from a flag that only
+  meant the page was open.
+- `PaintQuote` draws with `TextRenderer` (GDI), unlike the rest of the panel, because
+  what it shows is mostly Chinese and GDI follows the system's font links from Segoe UI
+  to the Chinese faces. It lays out its own lines, and from the end when the text does
+  not fit, so the newest words are the ones on show. Do not hand it to GDI's word wrap:
+  that lays out from the start and cannot break a run with no spaces in it, so a long
+  address, or Chinese where it finds no break, showed its oldest words, cut off at the
+  right.
+- `Bridge.Changed` is raised on server threads, once per phone poll. The form hands it
+  to `RefreshSoon`, which queues at most one `BeginInvoke` at a time; never touch a
+  control from the handler itself.
 - The palette lives in `Skin`. Everything is painted by `Skin.RoundedPath` and
   the small `Paint*` controls; do not reintroduce stock grey WinForms buttons.
 - Never use `TransparencyKey` on this form. It switches the window into a
@@ -103,20 +136,21 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   values inside a docked panel do not shrink that panel's minimum size, so a child
   extending past the client width makes WinForms grow the form and every size
   constant stops meaning anything. Use `TableLayoutPanel` or `Dock` for the rows.
-- Only the strip drags. Mouse-move goes to whichever control took the mouse down,
-  so the form's own `OnMouseMove` never fires; each draggable control handles
-  `MouseMove` itself and sets `Capture`. Save the position on drop, not on exit,
-  so a crash or a task-manager kill does not lose it.
+- Everything except the buttons and the address drags the panel. Mouse-move goes to
+  whichever control took the mouse down, so the form's own `OnMouseMove` never fires;
+  each draggable control handles `MouseMove` itself and sets `Capture`. Save the
+  position on drop, not on exit, so a crash or a task-manager kill does not lose it.
+  Expanding near the bottom of the screen, or a remembered spot from a bigger
+  monitor, goes through `ClampIntoView`.
 - **A right-click anywhere on the panel must open the tray menu, so `UsePanelMenu`
-  walks the whole control tree**, not just the form. WinForms sends `WM_CONTEXTMENU`
-  to the control under the cursor and never routes it up to a parent, so a
-  form-level assignment would work only on the few pixels that are genuinely the
-  form. One shared `ContextMenuStrip` instance is used, not a copy per control:
-  `ToolStripMenuItem` is not thread safe and the tray icon is still using the same
-  one. Assigning it also *replaces* each control's own right-click behaviour, which
-  is what stops the read-only `TextBox` drawing its native edit menu alongside it.
-  Because it is a real `ContextMenuStrip`, Shift+F10 and the context-menu key work
-  on the panel too.
+  walks the whole control tree**, not just the form, and hooks `MouseUp` on each
+  control. WinForms gives the click to the control under the cursor and never routes
+  it up to a parent, so a form-level handler would work only on the few pixels that
+  are genuinely the form. One shared `ContextMenuStrip` instance is used, not a copy
+  per control: `ToolStripMenuItem` is not thread safe and the tray icon is still using
+  the same one. It is shown through `ShowMenu` rather than assigned as each control's
+  `ContextMenuStrip`, because the focus has to be taken before it opens and given
+  back after. There is no keyboard route to it: the panel never has the focus.
 - A `Close()` from a panel button is swallowed by the hide-to-tray `FormClosing`
   handler. Raise `QuitRequested` and let the tray context set `_reallyQuitting`;
   that is the only path that actually exits.
@@ -131,6 +165,13 @@ the newest syntax. Use `var`, `function`, promises, and nothing newer.
   second one on the PC was a duplicate decision, not a safety net. It did mask
   room noise on a phone left face up, which is now a documented trade-off in the
   README rather than something the code hides.
+- Each poll says what the page is doing in an `X-Dictation-State` header, `listening`
+  or `idle`, from `wantRun`. `Bridge.Touch` turns it into `PhoneState`; the panel
+  used to say "listening on the phone" for any page that was merely open. A poll
+  without the header, from a page older than the desktop, is `Connected` and is never
+  guessed as listening, and ten seconds without one is `Away`. `syncStartButton()`
+  polls at once whenever `wantRun` changes, so the lamp follows the buttons instead of
+  trailing them by up to `POLL_MS`.
 - The Start button's `disabled` state comes from **`syncStartButton()` and nowhere
   else**, and its label never changes -- it always reads "Start listening". It used to
   be written from four event handlers, which is how they came to disagree. iOS
@@ -253,7 +294,7 @@ the right way round for keystrokes. Never fold new text into `outbox[0]`: it may
 sent already, and a retry has to repeat it exactly.
 
 **The phone is told when words were not typed.** `Injector.TypeText` returns a `TypeResult`:
-`Typed`; `OwnWindow`, when the panel has the focus and nothing is sent; `NoWindow`, when no
+`Typed`; `OwnWindow`, when this app has the focus and nothing is sent; `NoWindow`, when no
 window has it (locked, asleep, or between windows); `Blocked`, when `SendInput` refuses every
 key, which is UIPI in front of an elevated window; or `Partial`. The send loop stops at the
 first short call, so the end of a sentence is never typed without its middle. `/speak`

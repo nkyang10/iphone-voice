@@ -26,12 +26,17 @@ namespace DictationBridge
         public const uint INPUT_KEYBOARD = 1;
         public const uint KEYEVENTF_UNICODE = 0x0004;
         public const uint KEYEVENTF_KEYUP = 0x0002;
-        public const uint MOD_CONTROL = 0x0002;
-        public const uint MOD_ALT = 0x0001;
-        public const uint MOD_SHIFT = 0x0004;
-        public const uint MOD_WIN = 0x0008;
-        public const uint MOD_NOREPEAT = 0x4000;
-        public static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
+
+        // For a panel that never takes the focus; see MainForm.
+        public const int WS_EX_NOACTIVATE = 0x08000000;
+        public const int WS_EX_TOOLWINDOW = 0x00000080;
+        public const int WM_MOUSEACTIVATE = 0x0021;
+        public const int MA_NOACTIVATE = 3;
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_SHOWWINDOW = 0x0040;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct KEYBDINPUT
@@ -89,8 +94,22 @@ namespace DictationBridge
         [DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 
-        [DllImport("winmm.dll")]
-        public static extern uint timeGetTime();
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter,
+            int x, int y, int cx, int cy, uint flags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DestroyIcon(IntPtr hIcon);
     }
 
     // Everything the app generates lives in one folder next to the exe, so the
@@ -1116,6 +1135,19 @@ namespace DictationBridge
         public static readonly uint Current = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
     }
 
+    // What the phone is doing, as far as its status polls say.
+    internal enum PhoneState
+    {
+        // No poll for ten seconds: the page is closed, or the phone is locked.
+        Away,
+        // Polling, from a page too old to say whether it is listening.
+        Connected,
+        // Polling, with the Start button off.
+        Idle,
+        // Polling, with the Start button on.
+        Listening
+    }
+
     internal sealed class Bridge
     {
         private readonly object _gate = new object();
@@ -1127,12 +1159,26 @@ namespace DictationBridge
         private TypeResult _lastMiss = TypeResult.Typed;
         private DateTime _lastMissAt = DateTime.MinValue;
         private long _received;
+        // What the newest poll said: true with the page's Start button on, false
+        // with it off, null from a page that does not say.
+        private bool? _phoneListening;
 
         // "Connected" means the phone polled recently. An open connection says
-        // nothing: one can outlive the page that opened it by a good while.
-        public bool PhonePresent
+        // nothing: one can outlive the page that opened it by a good while. A
+        // page polls whether it is listening or not, so the panel used to say
+        // "listening on the phone" for a page that was only open; each poll now
+        // says which.
+        public PhoneState Phone
         {
-            get { lock (_gate) { return (DateTime.UtcNow - _lastSeen).TotalSeconds < 10; } }
+            get
+            {
+                lock (_gate)
+                {
+                    if ((DateTime.UtcNow - _lastSeen).TotalSeconds >= 10) return PhoneState.Away;
+                    if (!_phoneListening.HasValue) return PhoneState.Connected;
+                    return _phoneListening.Value ? PhoneState.Listening : PhoneState.Idle;
+                }
+            }
         }
 
         // A rolling window rather than the last chunk. The phone streams partial
@@ -1211,13 +1257,18 @@ namespace DictationBridge
             }
         }
 
-        public void Touch()
+        // A status poll. state is what the page says it is doing, "listening" or
+        // "idle"; anything else, including nothing, leaves it unknown rather than
+        // guessed.
+        public void Touch(string state)
         {
             bool firstContact;
             lock (_gate)
             {
                 firstContact = _lastSeen == DateTime.MinValue;
                 _lastSeen = DateTime.UtcNow;
+                _phoneListening = state == "listening" ? true
+                    : state == "idle" ? false : (bool?)null;
             }
             if (firstContact) Log.Write("phone reached the page");
             RaiseChanged();
@@ -1287,7 +1338,10 @@ namespace DictationBridge
                     // ever-growing wall that has to re-layout on every chunk.
                     if (_recentTyped.Length > 200)
                     {
-                        _recentTyped = _recentTyped.Substring(_recentTyped.Length - 200);
+                        // Not between the halves of an emoji.
+                        int cut = _recentTyped.Length - 200;
+                        if (char.IsLowSurrogate(_recentTyped[cut])) cut++;
+                        _recentTyped = _recentTyped.Substring(cut);
                     }
                 }
                 else
@@ -1656,6 +1710,8 @@ namespace DictationBridge
         // not attach a custom header to a request from another site without first
         // asking this server, which never says yes.
         private const string KeyHeader = "X-Dictation-Key";
+        // On each status poll: whether the page is listening, for the panel.
+        private const string StateHeader = "X-Dictation-State";
         // Safari's request heads run to about a kilobyte.
         private const int MaxHead = 16384;
         private const int MaxBody = 65536;
@@ -2016,7 +2072,7 @@ namespace DictationBridge
 
             if (status)
             {
-                bridge.Touch();
+                bridge.Touch(request.Header(StateHeader));
                 return Json(200, bridge.StatusJson());
             }
             if (speak)
@@ -2438,6 +2494,9 @@ namespace DictationBridge
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer, true);
+            // Not focusable, like everything else on the panel; see PaintDot.
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
             BackColor = Color.White;
         }
 
@@ -2505,62 +2564,31 @@ namespace DictationBridge
         }
     }
 
-    // A small always-on-top panel, in the shape of the floating helpers people
-    // already keep beside their work: a status strip you can hit to arm, with the
-    // details a click away. Borderless and draggable so it never gets in the way.
-    // Light palette. Windows apps that sit on top of your work all tend to be
-    // dark, and a dark block on a light document is the thing your eye snags on.
+    // The panel's palette and type. Light, because the Windows apps that sit on
+    // top of your work all tend to be dark, and a dark block on a light document
+    // is the thing your eye snags on.
     internal static class Skin
     {
-        public static readonly Color Page = Color.FromArgb(250, 250, 252);
         public static readonly Color Surface = Color.FromArgb(255, 255, 255);
         public static readonly Color Field = Color.FromArgb(243, 244, 247);
+        public static readonly Color FieldHot = Color.FromArgb(232, 235, 241);
+        public static readonly Color FieldDown = Color.FromArgb(220, 224, 232);
         public static readonly Color Ink = Color.FromArgb(32, 35, 42);
         public static readonly Color InkSoft = Color.FromArgb(108, 115, 128);
         public static readonly Color InkFaint = Color.FromArgb(160, 166, 178);
-        public static readonly Color Line = Color.FromArgb(228, 230, 236);
         public static readonly Color Accent = Color.FromArgb(24, 105, 220);
         public static readonly Color AccentSoft = Color.FromArgb(232, 240, 254);
         public static readonly Color Good = Color.FromArgb(22, 138, 74);
         public static readonly Color Warn = Color.FromArgb(184, 122, 0);
         public static readonly Color Danger = Color.FromArgb(197, 48, 48);
-        public static readonly Color Shadow = Color.FromArgb(28, 32, 44);
         public static readonly Color ShadowEdge = Color.FromArgb(216, 220, 228);
 
-        public static Font Ui { get { return new Font("Segoe UI", 9F); } }
-        public static Font UiSmall { get { return new Font("Segoe UI", 8.25F); } }
-        public static Font UiTiny { get { return new Font("Segoe UI", 7.5F); } }
-        public static Font Strong { get { return new Font("Segoe UI", 9.25F, FontStyle.Bold); } }
-        public static Font Badge { get { return new Font("Segoe UI", 8.5F, FontStyle.Bold); } }
-        public static Font Title { get { return new Font("Segoe UI", 10.5F, FontStyle.Bold); } }
-        public static Font Quote { get { return new Font("Segoe UI", 10F); } }
-
-        // Rounded corners make a borderless panel look like a card rather than a
-        // rectangle someone forgot to title-bar.
-        public static void Round(Control c, int radius)
-        {
-            try
-            {
-                using (GraphicsPath path = Rounded(c.ClientRectangle.Size, radius))
-                {
-                    Region region = new Region(path);
-                    c.Region = region;
-                }
-            }
-            catch (Exception) { }
-        }
-
-        private static GraphicsPath Rounded(Size size, int radius)
-        {
-            GraphicsPath p = new GraphicsPath();
-            int d = radius * 2;
-            p.AddArc(0, 0, d, d, 180, 90);
-            p.AddArc(size.Width - d, 0, d, d, 270, 90);
-            p.AddArc(size.Width - d, size.Height - d, d, d, 0, 90);
-            p.AddArc(0, size.Height - d, d, d, 90, 90);
-            p.CloseFigure();
-            return p;
-        }
+        // Made once and shared. These used to be properties that built a new Font
+        // on every read, so each control that asked got one of its own, and none
+        // of them was ever disposed.
+        public static readonly Font Ui = new Font("Segoe UI", 9F);
+        public static readonly Font UiSmall = new Font("Segoe UI", 8.25F);
+        public static readonly Font Quote = new Font("Segoe UI", 10F);
 
         public static GraphicsPath RoundedPath(Rectangle r, int radius)
         {
@@ -2573,20 +2601,45 @@ namespace DictationBridge
             p.CloseFigure();
             return p;
         }
+
+        // DrawString's placement for a ContentAlignment, which has one bit per
+        // cell: the rows are 0x7, 0x70 and 0x700, the columns 0x111, 0x222 and
+        // 0x444. Wrapped text keeps whole lines only, so a line that does not fit
+        // is left out rather than cut through the middle.
+        public static StringFormat Format(ContentAlignment align, bool wrap)
+        {
+            int a = (int)align;
+            var f = new StringFormat();
+            f.LineAlignment = (a & 0x7) != 0 ? StringAlignment.Near
+                : (a & 0x700) != 0 ? StringAlignment.Far : StringAlignment.Center;
+            f.Alignment = (a & 0x111) != 0 ? StringAlignment.Near
+                : (a & 0x444) != 0 ? StringAlignment.Far : StringAlignment.Center;
+            f.FormatFlags = wrap ? StringFormatFlags.LineLimit
+                : StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
+            f.Trimming = StringTrimming.EllipsisCharacter;
+            return f;
+        }
     }
 
     // Small self-painted pieces. Doing these by hand is what stops the panel
     // looking like a stack of grey WinForms rectangles.
+    //
+    // None of them can take the focus, and nothing else may be added to the panel
+    // that can. WinForms focuses a selectable control when it is clicked, focusing
+    // it activates the panel, and typing is refused while the panel is the window
+    // in front (TypeResult.OwnWindow). See MainForm.
     internal sealed class PaintDot : Control
     {
-        public Color DotColor = Skin.Good;
-        public bool Breathe;
-        public int Phase;
+        private Color _color = Skin.InkFaint;
+        private bool _breathe;
+        private int _phase;
 
         public PaintDot()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer, true);
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
             // Explicit, not Color.Transparent: a custom-painted control given
             // that back colour throws "not a valid owner window handle" unless
             // it is parented first, and once parented it still routes through
@@ -2595,28 +2648,46 @@ namespace DictationBridge
             Size = new Size(12, 12);
         }
 
+        // Repaints only on a change: the panel refreshes several times a second,
+        // and the dot is nearly always what it was.
+        public void Set(Color color, bool breathe)
+        {
+            if (color == _color && breathe == _breathe) return;
+            _color = color;
+            _breathe = breathe;
+            Invalidate();
+        }
+
+        // One step of the breath, from the panel's pulse timer. A dot that is not
+        // breathing is left alone.
+        public void Step()
+        {
+            _phase = (_phase + 1) % 4;
+            if (_breathe) Invalidate();
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
             float scale = 1F;
-            if (Breathe)
+            if (_breathe)
             {
-                // 3 -> 5 -> 6 -> 5, a calm breathing ring rather than a blink.
+                // 4 -> 5 -> 6 -> 5, a calm breathing ring rather than a blink.
                 int[] radii = { 4, 5, 6, 5 };
-                scale = radii[Phase % 4] / 4F;
+                scale = radii[_phase] / 4F;
             }
             float cx = Width / 2F, cy = Height / 2F;
             float r = 3.2F * scale;
             if (scale > 1.05F)
             {
-                using (Pen halo = new Pen(Color.FromArgb(70, DotColor)))
+                using (Pen halo = new Pen(Color.FromArgb(70, _color)))
                 {
                     halo.Width = 1.6F;
                     g.DrawEllipse(halo, cx - r - 2.2F, cy - r - 2.2F, (r + 2.2F) * 2, (r + 2.2F) * 2);
                 }
             }
-            using (SolidBrush b = new SolidBrush(DotColor))
+            using (SolidBrush b = new SolidBrush(_color))
             {
                 g.FillEllipse(b, cx - r, cy - r, r * 2, r * 2);
             }
@@ -2625,96 +2696,379 @@ namespace DictationBridge
 
     internal sealed class PaintText : Control
     {
-        public string Caption = "";
-        public Color InkColor = Skin.InkSoft;
+        private string _caption = "";
+        private Color _ink = Skin.InkSoft;
+        private bool _link;
+        private bool _hot;
+        private Font _underlined;
         public Font TextFont = Skin.UiSmall;
         public ContentAlignment Align = ContentAlignment.MiddleLeft;
+        // Wraps onto as many lines as fit, rather than trimming to one.
+        public bool Wrap;
 
         public PaintText()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer, true);
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
             // An explicit parent colour rather than Color.Transparent, which
             // throws before parenting and, on a parent, still forces the
             // layered rendering path that makes text jagged.
             BackColor = Skin.Surface;
         }
 
-        protected override void OnPaint(PaintEventArgs e)
+        // Text that does something when it is clicked: the hand cursor, and an
+        // underline while the mouse is over it.
+        public bool Link
         {
-            e.Graphics.TextRenderingHint =
-                System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            // Graphics.DrawString wants a StringFormat, not TextFormatFlags.
-            using (StringFormat f = new StringFormat())
+            get { return _link; }
+            set
             {
-                f.Alignment = Align == ContentAlignment.MiddleCenter
-                    ? StringAlignment.Center
-                    : Align == ContentAlignment.MiddleRight
-                        ? StringAlignment.Far
-                        : StringAlignment.Near;
-                f.LineAlignment = StringAlignment.Center;
-                f.FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
-                f.Trimming = StringTrimming.EllipsisCharacter;
-                using (SolidBrush b = new SolidBrush(InkColor))
-                {
-                    e.Graphics.DrawString(Caption, TextFont, b,
-                        new RectangleF(0, 0, Width, Height), f);
-                }
+                _link = value;
+                Cursor = value ? Cursors.Hand : Cursors.Default;
             }
         }
 
         public void Set(string text, Color color)
         {
-            Caption = text;
-            InkColor = color;
+            text = text ?? "";
+            if (text == _caption && color == _ink) return;
+            _caption = text;
+            _ink = color;
+            AccessibleName = text;
             Invalidate();
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            if (_link)
+            {
+                _hot = true;
+                Invalidate();
+            }
+            base.OnMouseEnter(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (_hot)
+            {
+                _hot = false;
+                Invalidate();
+            }
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.TextRenderingHint =
+                System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            Font font = TextFont;
+            if (_hot)
+            {
+                if (_underlined == null)
+                {
+                    _underlined = new Font(TextFont, TextFont.Style | FontStyle.Underline);
+                }
+                font = _underlined;
+            }
+            // Graphics.DrawString wants a StringFormat, not TextFormatFlags.
+            using (StringFormat f = Skin.Format(Align, Wrap))
+            using (SolidBrush b = new SolidBrush(_ink))
+            {
+                e.Graphics.DrawString(_caption, font, b, new RectangleF(0, 0, Width, Height), f);
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _underlined != null)
+            {
+                _underlined.Dispose();
+                _underlined = null;
+            }
+            base.Dispose(disposing);
         }
     }
 
-    // A rounded card with an optional left accent bar.
+    // A rounded card.
     internal sealed class PaintCard : Control
     {
         public Color Fill = Skin.Field;
         public int Corner = 8;
-        public Color? Accent = null;
 
         public PaintCard()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
-                | ControlStyles.OptimizedDoubleBuffer, true);
+                | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
             BackColor = Skin.Surface;
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
-            using (GraphicsPath path = Skin.RoundedPath(r, Corner))
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath path = Skin.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), Corner))
             using (SolidBrush b = new SolidBrush(Fill))
             {
                 g.FillPath(b, path);
             }
-            if (Accent.HasValue)
-            {
-                using (SolidBrush b = new SolidBrush(Accent.Value))
-                using (GraphicsPath bar = Skin.RoundedPath(
-                    new Rectangle(0, 0, 3, Height - 1), 2))
-                {
-                    g.FillPath(b, bar);
-                }
-            }
         }
     }
 
-    // A flat button that paints its own rounded shape and hover states.
+    // What was typed most recently, as a quote. Painted, where it used to be a
+    // read-only TextBox: a TextBox shows the start of its text and hides the rest,
+    // and the words worth seeing are the newest ones, at the end. The TextBox
+    // could also take the focus, which stopped the typing it was there to show.
+    //
+    // The words are drawn with TextRenderer, which is GDI, as the TextBox was,
+    // and not Graphics.DrawString like the rest of the panel. They are mostly
+    // Chinese, and GDI follows the system's font links from Segoe UI to its
+    // Chinese faces; that is the drawing path every other window on the PC
+    // shows them with.
+    internal sealed class PaintQuote : Control
+    {
+        private const string Ellipsis = "\u2026";
+        // One line at a time. NoPrefix, or an "&" in what was said would
+        // underline the next letter; NoPadding, so widths add up to the box's.
+        private const TextFormatFlags OneLine = TextFormatFlags.SingleLine
+            | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.Left;
+        private static readonly Size Unbounded = new Size(int.MaxValue, int.MaxValue);
+        // Closing punctuation stays at the end of the line it closes.
+        private const string NoLineStart = "\uFF0C\u3002\u3001\uFF1B\uFF1A\uFF01\uFF1F\uFF09\u300D\u300F\u3009\u300B\u3011\u3015,.;:!?)";
+
+        private string _text = "";
+        // Shown, faintly, until something has been typed: an empty grey box
+        // looked like a part of the panel that had failed to load.
+        public string Placeholder = "";
+        // The last layout, kept until the text or the width changes.
+        private List<string> _lines;
+        private string _linesFor;
+        private Size _linesBox;
+
+        public PaintQuote()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
+            BackColor = Skin.Surface;
+        }
+
+        public void SetText(string text)
+        {
+            text = text ?? "";
+            if (text == _text) return;
+            _text = text;
+            AccessibleName = text;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            string text = _text.Trim();
+            bool empty = text.Length == 0;
+            using (GraphicsPath card = Skin.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 8))
+            using (SolidBrush fill = new SolidBrush(empty ? Skin.Field : Skin.AccentSoft))
+            {
+                g.FillPath(fill, card);
+            }
+            if (empty)
+            {
+                using (StringFormat f = Skin.Format(ContentAlignment.MiddleCenter, true))
+                using (SolidBrush ink = new SolidBrush(Skin.InkFaint))
+                {
+                    g.DrawString(Placeholder, Skin.UiSmall, ink, new RectangleF(8, 0, Width - 16, Height), f);
+                }
+                return;
+            }
+            // A quote bar inside the card, clear of its rounded corners. It used
+            // to run the card's full height, square, and poke out past them.
+            if (Height > 20)
+            {
+                using (GraphicsPath bar = Skin.RoundedPath(new Rectangle(10, 9, 3, Height - 19), 1))
+                using (SolidBrush accent = new SolidBrush(Skin.Accent))
+                {
+                    g.FillPath(accent, bar);
+                }
+            }
+            // Three lines, even in a Chinese face a couple of pixels taller.
+            Rectangle box = new Rectangle(21, 3, Math.Max(1, Width - 31), Math.Max(1, Height - 6));
+            // Measured with a Chinese character in it: the face GDI links to
+            // for Chinese stands taller than Segoe UI.
+            int lineHeight = Math.Max(1, TextRenderer.MeasureText(g, "Ag\u4E2D", Skin.Quote, Unbounded, OneLine).Height);
+            if (_lines == null || _linesFor != text || _linesBox != box.Size)
+            {
+                _lines = LinesOf(g, text, Skin.Quote, box.Width, Math.Max(1, box.Height / lineHeight));
+                _linesFor = text;
+                _linesBox = box.Size;
+            }
+            int top = box.Y + (box.Height - _lines.Count * lineHeight) / 2;
+            foreach (string line in _lines)
+            {
+                TextRenderer.DrawText(g, line, Skin.Quote, new Rectangle(box.X, top, box.Width, lineHeight),
+                    Skin.Ink, OneLine | TextFormatFlags.NoClipping);
+                top += lineHeight;
+            }
+        }
+
+        // The lines to show. Wrapped from the start, the ordinary way, when it all
+        // fits; when it does not, laid out from the end instead, so that the
+        // newest words are the ones on show and the oldest go behind an
+        // ellipsis. Done here rather than by GDI's word wrap, which only lays out
+        // from the start, and which cannot break a run with no spaces in it -- an
+        // address, or a sentence of Chinese where it finds no break -- so it
+        // shows the run's beginning, cut off at the right.
+        internal static List<string> LinesOf(IDeviceContext g, string text, Font font, int width, int maxLines)
+        {
+            var lines = new List<string>();
+            int start = 0;
+            while (start < text.Length && lines.Count <= maxLines)
+            {
+                int end = BreakBefore(text, start, FitTo(g, text, start, font, width));
+                lines.Add(text.Substring(start, end - start).Trim());
+                start = end;
+                while (start < text.Length && text[start] == ' ') start++;
+            }
+            if (lines.Count <= maxLines) return lines;
+
+            lines.Clear();
+            int stop = text.Length;
+            while (stop > 0 && lines.Count < maxLines)
+            {
+                bool first = lines.Count == maxLines - 1;
+                int from = FitFrom(g, text, stop, font, width, "");
+                if (from > 0 && first) from = FitFrom(g, text, stop, font, width, Ellipsis);
+                from = BreakAfter(text, from, stop);
+                string line = text.Substring(from, stop - from).Trim();
+                lines.Insert(0, from > 0 && first ? Ellipsis + line : line);
+                stop = from;
+                while (stop > 0 && text[stop - 1] == ' ') stop--;
+            }
+            return lines;
+        }
+
+        private static int WidthOf(IDeviceContext g, string s, Font font)
+        {
+            return s.Length == 0 ? 0 : TextRenderer.MeasureText(g, s, font, Unbounded, OneLine).Width;
+        }
+
+        // The furthest a line from start can run and still fit; one character
+        // at least, so a layout always gets somewhere.
+        private static int FitTo(IDeviceContext g, string text, int start, Font font, int width)
+        {
+            if (WidthOf(g, text.Substring(start), font) <= width) return text.Length;
+            int lo = start, hi = text.Length;
+            while (hi - lo > 1)
+            {
+                int mid = (lo + hi) / 2;
+                if (WidthOf(g, text.Substring(start, mid - start), font) <= width) lo = mid;
+                else hi = mid;
+            }
+            return Math.Max(lo, start + 1);
+        }
+
+        // The earliest a line ending at stop can begin, with prefix in front of
+        // it, and still fit.
+        private static int FitFrom(IDeviceContext g, string text, int stop, Font font, int width, string prefix)
+        {
+            if (WidthOf(g, prefix + text.Substring(0, stop), font) <= width) return 0;
+            int lo = 0, hi = stop;
+            while (hi - lo > 1)
+            {
+                int mid = (lo + hi) / 2;
+                if (WidthOf(g, prefix + text.Substring(mid, stop - mid), font) <= width) hi = mid;
+                else lo = mid;
+            }
+            return Math.Min(hi, stop - 1);
+        }
+
+        // Where a line that fits from start to end should stop: at a space if one
+        // is near, or else wherever two characters may be parted. Chinese has no
+        // spaces and is parted between any two characters, as it is everywhere.
+        private static int BreakBefore(string text, int start, int end)
+        {
+            if (end >= text.Length) return text.Length;
+            if (text[end] == ' ' || text[end - 1] == ' ') return end;
+            int space = text.LastIndexOf(' ', end - 1, end - start);
+            if (space > start && end - space <= (end - start) / 3) return space;
+            int at = end;
+            while (at > start + 1 && !CanPart(text, at)) at--;
+            if (CanPart(text, at)) return at;
+            // Nowhere inside the line: run on to the next place there is.
+            at = end;
+            while (at < text.Length && !CanPart(text, at)) at++;
+            return at;
+        }
+
+        // The same from the other end: where a line that fits from from to stop
+        // should begin.
+        private static int BreakAfter(string text, int from, int stop)
+        {
+            if (from <= 0) return 0;
+            if (text[from] == ' ' || text[from - 1] == ' ') return from;
+            int space = text.IndexOf(' ', from, stop - from);
+            if (space >= 0 && space + 1 < stop && space + 1 - from <= (stop - from) / 3) return space + 1;
+            int at = from;
+            while (at < stop - 1 && !CanPart(text, at)) at++;
+            if (CanPart(text, at)) return at;
+            at = from;
+            while (at > 0 && !CanPart(text, at)) at--;
+            return at;
+        }
+
+        // Whether a line may end just before text[i]. Not inside an emoji -- the
+        // halves of a surrogate pair, a joiner, a variation selector or a skin
+        // tone -- nor before a combining mark or closing punctuation.
+        private static bool CanPart(string text, int i)
+        {
+            if (i <= 0 || i >= text.Length) return true;
+            char c = text[i];
+            char before = text[i - 1];
+            if (char.IsLowSurrogate(c) || c == '\u200D' || before == '\u200D') return false;
+            if (c >= '\uFE00' && c <= '\uFE0F') return false;
+            if (c == '\uD83C' && i + 1 < text.Length && text[i + 1] >= '\uDFFB' && text[i + 1] <= '\uDFFF')
+            {
+                return false;
+            }
+            System.Globalization.UnicodeCategory kind = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c);
+            if (kind == System.Globalization.UnicodeCategory.NonSpacingMark
+                || kind == System.Globalization.UnicodeCategory.SpacingCombiningMark
+                || kind == System.Globalization.UnicodeCategory.EnclosingMark)
+            {
+                return false;
+            }
+            return NoLineStart.IndexOf(c) < 0;
+        }
+    }
+
+    internal enum ButtonGlyph
+    {
+        None,
+        ChevronDown,
+        ChevronUp
+    }
+
+    // A flat button that paints its own rounded shape, hover and press. It never
+    // takes the focus; see PaintDot.
     internal sealed class SoftButton : Button
     {
         public Color Fill = Skin.Field;
-        public Color Hover = Color.FromArgb(232, 235, 241);
+        public Color Hover = Skin.FieldHot;
+        public Color Pressed = Skin.FieldDown;
         public Color Ink = Skin.Ink;
         public int Corner = 7;
-        public bool Primary;
+        // Drawn instead of the text when set. A chevron drawn with a pen comes out
+        // the same in every font; a "+" or "_" in Segoe UI sat off centre.
+        public ButtonGlyph Glyph = ButtonGlyph.None;
+        private bool _hot;
+        private bool _down;
 
         public SoftButton()
         {
@@ -2723,7 +3077,42 @@ namespace DictationBridge
             FlatAppearance.BorderSize = 0;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer, true);
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
+            Cursor = Cursors.Hand;
             BackColor = Skin.Surface;
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            _hot = true;
+            Invalidate();
+            base.OnMouseEnter(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            _hot = false;
+            _down = false;
+            Invalidate();
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                _down = true;
+                Invalidate();
+            }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            _down = false;
+            Invalidate();
+            base.OnMouseUp(e);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -2732,71 +3121,164 @@ namespace DictationBridge
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint =
                 System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            bool hot = Enabled && IsDefault;
-            Color fill = hot ? Hover : Fill;
-            Color ink = Primary ? Color.White : Ink;
+            // Hover used to be keyed to IsDefault, which a panel that never has
+            // the focus never sets, so it did not show at all.
+            Color fill = !Enabled ? Fill : _down ? Pressed : _hot ? Hover : Fill;
+            Color ink = Enabled ? Ink : Skin.InkFaint;
 
+            g.Clear(BackColor);
             Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
             using (GraphicsPath p = Skin.RoundedPath(r, Corner))
             using (SolidBrush b = new SolidBrush(fill))
             {
                 g.FillPath(b, p);
             }
-            // Graphics.DrawString needs a StringFormat rather than TextFormatFlags.
-            using (StringFormat f = new StringFormat())
+
+            if (Glyph != ButtonGlyph.None)
             {
-                f.Alignment = StringAlignment.Center;
-                f.LineAlignment = StringAlignment.Center;
-                f.FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip;
-                f.Trimming = StringTrimming.EllipsisCharacter;
-                using (SolidBrush b = new SolidBrush(Enabled ? ink : Skin.InkFaint))
+                float cx = Width / 2F, cy = Height / 2F;
+                // Down points down: the panel opens downwards.
+                float dy = Glyph == ButtonGlyph.ChevronDown ? 2.25F : -2.25F;
+                using (Pen pen = new Pen(ink, 1.6F))
                 {
-                    g.DrawString(Text, Font, b, new RectangleF(r.X, r.Y, r.Width, r.Height), f);
+                    pen.StartCap = LineCap.Round;
+                    pen.EndCap = LineCap.Round;
+                    pen.LineJoin = LineJoin.Round;
+                    g.DrawLines(pen, new[]
+                    {
+                        new PointF(cx - 4.5F, cy - dy),
+                        new PointF(cx, cy + dy),
+                        new PointF(cx + 4.5F, cy - dy)
+                    });
                 }
+                return;
+            }
+
+            // Graphics.DrawString needs a StringFormat rather than TextFormatFlags.
+            using (StringFormat f = Skin.Format(ContentAlignment.MiddleCenter, false))
+            using (SolidBrush b = new SolidBrush(ink))
+            {
+                g.DrawString(Text, Font, b, new RectangleF(r.X, r.Y, r.Width, r.Height), f);
             }
         }
     }
 
+    // What the strip and the tray icon say, decided in one place so the two
+    // cannot disagree. The first match wins.
+    internal sealed class PanelStatus
+    {
+        public readonly string Strip;
+        public readonly string Tip;
+        public readonly Color Ink;
+        public readonly Color Dot;
+        public readonly bool Breathe;
+
+        private PanelStatus(string strip, string tip, Color ink, Color dot, bool breathe)
+        {
+            Strip = strip;
+            Tip = tip;
+            Ink = ink;
+            Dot = dot;
+            Breathe = breathe;
+        }
+
+        public static PanelStatus Of(Bridge bridge)
+        {
+            // Words that did not land come first: it is the one thing here that
+            // asks the person at the PC to do something now.
+            string miss = bridge.RecentMiss;
+            if (miss != null) return new PanelStatus(miss, miss, Skin.Warn, Skin.Warn, false);
+            switch (bridge.Phone)
+            {
+                case PhoneState.Listening:
+                    return new PanelStatus("listening on the phone", "listening on the phone",
+                        Skin.Good, Skin.Good, true);
+                case PhoneState.Idle:
+                    return new PanelStatus("phone connected: tap Start listening",
+                        "phone connected, not listening", Skin.InkSoft, Skin.Accent, false);
+                case PhoneState.Connected:
+                    return new PanelStatus("phone connected", "phone connected",
+                        Skin.InkSoft, Skin.Accent, false);
+            }
+            if (bridge.RecentlyRefused)
+            {
+                return new PanelStatus("phone not paired: scan the QR code",
+                    "phone not paired, scan the QR code", Skin.Warn, Skin.Warn, false);
+            }
+            if (!Pairing.Used)
+            {
+                return new PanelStatus("scan the QR code to pair", "scan the QR code to pair",
+                    Skin.Warn, Skin.InkFaint, false);
+            }
+            return new PanelStatus("phone not connected: open the page", "phone not connected",
+                Skin.InkSoft, Skin.InkFaint, false);
+        }
+    }
+
+    // A small always-on-top panel, in the shape of the floating helpers people
+    // already keep beside their work: a status strip, with the QR code and the
+    // newest words a click away. Borderless and draggable so it never gets in
+    // the way.
+    //
+    // It never takes the focus. Words are typed into whichever window has the
+    // focus, and the one window they must never go to is this one, so a click on
+    // the panel used to be enough to stop dictation: the click activated the
+    // panel, the next chunk was refused as OwnWindow, and the user had to click
+    // back into their document to carry on. WS_EX_NOACTIVATE and MA_NOACTIVATE
+    // stop a click activating it, ShowWithoutActivation stops showing it doing
+    // so, and none of the controls on it is selectable. The menu is the one
+    // exception, and it hands the focus back; see ShowMenu.
     internal sealed class MainForm : Form
     {
+        // Tag for a menu item that opens a window of its own, which should keep
+        // the focus when the menu closes rather than hand it back.
+        public static readonly object KeepsFocus = new object();
+
         private readonly Bridge _bridge;
         private readonly string _url;
         private readonly ContextMenuStrip _panelMenu;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly System.Windows.Forms.Timer _pulse;
+        private readonly System.Windows.Forms.Timer _copied;
+        private readonly ToolTip _tips;
 
         // Not readonly: these are built by BuildUi, which is called from the
         // constructor but is not itself one.
         private Panel _strip;
         private Panel _detail;
         private Panel _body;
-        private Button _collapse;
-        private TextBox _lastText;
-        private LinkLabel _urlLink;
+        private SoftButton _collapse;
+        private SoftButton _copyButton;
+        private PaintDot _lamp;
+        private PaintText _phoneState;
+        private PaintQuote _quote;
+        private QrView _qr;
 
         private Point _dragOrigin;
         private bool _dragging;
         private bool _expanded;
         private bool _pairedAtStart;
-        private int _pulsePhase;
-        private PaintDot _lamp;
-        private PaintText _phoneState;
-        private PaintCard _lastCard;
-        private QrView _qr;
+        private int _refreshQueued;
+        // Where the focus was before the menu took it, and whether the item that
+        // was chosen wants to keep it.
+        private IntPtr _focusBeforeMenu = IntPtr.Zero;
+        private bool _menuKeepsFocus;
 
         // One place that owns the sizes, so expand and collapse cannot disagree.
-        // The expanded panel lost the queue list, the hold-until-armed checkbox and
-        // the hotkey row, so it is shorter than it was. Eight pixels taller than
-        // that again since the QR code started carrying the pairing key.
         private static readonly Size CollapsedSize = new Size(320, 56);
         private static readonly Size ExpandedSize = new Size(320, 326);
+        private const int StripHeight = 48;
         // The QR code and the card around it. The pairing key makes the code one
         // size step bigger, 41 modules with the quiet zone; 124px keeps every
         // module three whole pixels wide, which a phone camera resolves easily.
         private const int QrSide = 124;
         private const int QrInset = 8;
         private const int UrlCardHeight = QrSide + QrInset * 2;
-        private const int UrlTextLeft = QrSide + QrInset * 2 - 2;
+        // The quote has the rest of the height above the buttons. It used to be
+        // shorter, over 24 pixels of nothing.
+        private const int QuoteRowHeight = 76;
+        private const int FooterHeight = 44;
+        private const string CopyLabel = "Copy pairing link";
         private const string PositionFile = "dictation-bridge-position.txt";
 
         public MainForm(Bridge bridge, string url, ContextMenuStrip panelMenu)
@@ -2816,7 +3298,6 @@ namespace DictationBridge
             MaximumSize = ExpandedSize;
             AutoSize = false;
             StartPosition = FormStartPosition.Manual;
-            BackColor = Skin.Surface;
             ForeColor = Skin.Ink;
             Font = Skin.Ui;
             TopMost = true;
@@ -2832,12 +3313,21 @@ namespace DictationBridge
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
 
+            // ShowAlways, or a tip shows only while the panel is the active
+            // window, which it never is.
+            _tips = new ToolTip { ShowAlways = true, InitialDelay = 500 };
+
             BuildUi(this);
             UsePanelMenu(this);
             ResizeRounded();
             Resize += (s, e) => ResizeRounded();
+            if (_panelMenu != null)
+            {
+                _panelMenu.ItemClicked += OnMenuItemClicked;
+                _panelMenu.Closed += OnMenuClosed;
+            }
 
-            _bridge.Changed += Refresh2;
+            _bridge.Changed += RefreshSoon;
             _timer = new System.Windows.Forms.Timer { Interval = 700 };
             _timer.Tick += (s, e) =>
             {
@@ -2846,24 +3336,77 @@ namespace DictationBridge
             };
             _timer.Start();
 
-            // A slow breath on the lamp while the phone is in touch, so it is obvious at a
-            // glance that the app is listening without needing to read anything.
+            // A slow breath on the lamp while the phone is listening, so it is
+            // obvious at a glance without reading anything.
             _pulse = new System.Windows.Forms.Timer { Interval = 900 };
-            _pulse.Tick += (s, e) =>
-            {
-                _pulsePhase = (_pulsePhase + 1) % 4;
-                if (_lamp != null) _lamp.Invalidate();
-            };
+            _pulse.Tick += (s, e) => _lamp.Step();
             _pulse.Start();
+
+            // Puts the copy button's label back after it has said "Copied".
+            _copied = new System.Windows.Forms.Timer { Interval = 1500 };
+            _copied.Tick += (s, e) =>
+            {
+                _copied.Stop();
+                _copyButton.Text = CopyLabel;
+                _copyButton.Ink = Skin.Ink;
+                _copyButton.Invalidate();
+            };
 
             FormClosed += (s, e) =>
             {
+                _bridge.Changed -= RefreshSoon;
+                if (_panelMenu != null)
+                {
+                    _panelMenu.ItemClicked -= OnMenuItemClicked;
+                    _panelMenu.Closed -= OnMenuClosed;
+                }
                 _timer.Stop();
                 _pulse.Stop();
+                _copied.Stop();
+                _tips.Dispose();
                 SavePosition();
             };
             LoadPosition();
             Refresh2();
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                // TOOLWINDOW as well, which keeps it out of Alt+Tab, the one other
+                // way it could be handed the focus by accident.
+                cp.ExStyle |= Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW;
+                return cp;
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            // The click still reaches the control under the mouse; the window in
+            // front stays in front.
+            if (m.Msg == Native.WM_MOUSEACTIVATE)
+            {
+                m.Result = (IntPtr)Native.MA_NOACTIVATE;
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        // Shows the panel on top of everything without taking the focus. Show()
+        // alone puts it back where it was in the z-order, which can be under
+        // another window that is always on top.
+        public void ShowQuietly()
+        {
+            Show();
+            Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
         }
 
         // A panel that opens on top of the taskbar, or half off the edge of a
@@ -2896,6 +3439,9 @@ namespace DictationBridge
             if (remembered.HasValue && OnScreen(remembered.Value, area))
             {
                 Location = remembered.Value;
+                // The spot was saved for the collapsed strip, and the panel may
+                // be opening expanded, on the QR code.
+                ClampIntoView();
                 return;
             }
 
@@ -2935,55 +3481,42 @@ namespace DictationBridge
             };
 
             // ---- the strip -------------------------------------------------
+            // The lamp, what the phone is doing, and the button for the details.
+            // Placed by hand, in LayOutStrip: the button used to be docked to the
+            // right, which stretched it into a grey slab the height of the strip
+            // that the panel's rounded corner then cut into.
             _strip = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 48,
+                Height = StripHeight,
                 BackColor = Skin.Surface
+            };
+
+            _lamp = new PaintDot { Location = new Point(12, (StripHeight - 12) / 2) };
+
+            // Where the on/off switch is, rather than a second one: the phone's
+            // Start button is the only switch.
+            _phoneState = new PaintText
+            {
+                Location = new Point(30, (StripHeight - 24) / 2),
+                Size = new Size(200, 24),
+                TextFont = Skin.UiSmall,
+                Align = ContentAlignment.MiddleLeft
             };
 
             _collapse = new SoftButton
             {
-                Dock = DockStyle.Right,
-                Width = 28,
-                Height = 30,
-                Text = "+",
-                Font = new Font("Segoe UI", 11F),
+                Size = new Size(28, 28),
+                Fill = Skin.Surface,
                 Ink = Skin.InkSoft,
                 Corner = 8
             };
             _collapse.Click += (s, e) => SetExpanded(!_expanded);
 
-            var stripPad = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Skin.Surface
-            };
-
-            _lamp = new PaintDot
-            {
-                Location = new Point(12, 18),
-                Size = new Size(12, 12)
-            };
-
-            // "Start on the phone" replaces what used to be an armed/disarmed
-            // button: the only on/off switch is on the phone now, so the strip says
-            // where it is rather than offering a second one.
-            _phoneState = new PaintText
-            {
-                Location = new Point(30, 9),
-                Size = new Size(200, 24),
-                TextFont = Skin.UiSmall,
-                InkColor = Skin.InkSoft,
-                Align = ContentAlignment.MiddleLeft
-            };
-
-            stripPad.Controls.Add(_phoneState);
-            stripPad.Controls.Add(_lamp);
-
-            _strip.Controls.Add(stripPad);
+            _strip.Controls.Add(_lamp);
+            _strip.Controls.Add(_phoneState);
             _strip.Controls.Add(_collapse);
-            stripPad.BringToFront();
+            _strip.Resize += (s, e) => LayOutStrip();
 
             // ---- everything below the strip --------------------------------
             _detail = new Panel
@@ -2993,11 +3526,10 @@ namespace DictationBridge
                 Padding = new Padding(14, 4, 14, 10)
             };
 
-            // Address, on a soft card so it reads as a field rather than a link.
-            // The QR code sits on the left of it: scanning beats typing a URL
-            // into a phone keyboard, and the address changes every time the
-            // machine lands on a new network, so it has to be shown not written
-            // down.
+            // The QR code, on a soft card with the address beside it. Scanning
+            // beats typing a URL into a phone keyboard, and the address changes
+            // every time the machine lands on a new network, so it has to be
+            // shown, not written down.
             var urlCard = new Panel
             {
                 Dock = DockStyle.Top,
@@ -3020,79 +3552,64 @@ namespace DictationBridge
             };
             _qr.SetAddress(Pairing.Link(_url));
 
-            var urlRight = new Panel
-            {
-                Location = new Point(UrlTextLeft, 0),
-                Size = new Size(urlCard.Width - UrlTextLeft, urlCard.Height),
-                BackColor = Skin.Field
-            };
-            _urlLink = new LinkLabel
-            {
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleCenter,
-                AutoSize = false,
-                Font = Skin.UiSmall,
-                LinkColor = Skin.Accent,
-                ActiveLinkColor = Skin.Accent,
-                BackColor = Skin.Field
-            };
             // The address is still shown, because it is what to check when the
             // phone cannot connect, but the caption says what actually pairs.
-            const string caption = "Scan with the iPhone camera to pair";
-            _urlLink.Text = caption + "\n\n" + _url;
-            _urlLink.LinkArea = new LinkArea(caption.Length + 2, _url.Length);
-            _urlLink.ForeColor = Skin.InkSoft;
-            _urlLink.LinkClicked += (s, e) => CopyPairingLink();
-            urlRight.Controls.Add(_urlLink);
+            // Both wrap. They used to share a LinkLabel, which cut a longer
+            // address off at both ends and pushed the caption out of sight.
+            var caption = new PaintText
+            {
+                TextFont = Skin.UiSmall,
+                Align = ContentAlignment.BottomCenter,
+                Wrap = true,
+                BackColor = Skin.Field
+            };
+            caption.Set("Scan with the iPhone camera to pair", Skin.InkSoft);
+            var address = new PaintText
+            {
+                TextFont = Skin.UiSmall,
+                Align = ContentAlignment.TopCenter,
+                Wrap = true,
+                Link = true,
+                BackColor = Skin.Field
+            };
+            address.Set(_url, Skin.Accent);
+            // MouseClick, not Click, which a right-click raises as well.
+            address.MouseClick += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left) CopyPairingLink();
+            };
+            _tips.SetToolTip(address, "Copy the pairing link");
             urlCard.Resize += (s, e) =>
             {
                 // Absolute coordinates inside a docked panel do not shrink that
-                // panel's minimum size, so the right-hand box is kept in step
-                // with the card here rather than relying on Dock.
-                urlRight.Width = urlCard.ClientSize.Width - UrlTextLeft;
-                urlRight.Height = urlCard.ClientSize.Height;
+                // panel's minimum size, so the text is kept in step with the card
+                // here rather than relying on Dock.
+                int left = QrInset + QrSide + 6;
+                int width = Math.Max(0, urlCard.ClientSize.Width - left - 8);
+                caption.SetBounds(left, 18, width, 50);
+                address.SetBounds(left, 74, width, 48);
             };
 
-            urlCard.Controls.Add(urlRight);
+            urlCard.Controls.Add(address);
+            urlCard.Controls.Add(caption);
             urlCard.Controls.Add(_qr);
             urlCard.Controls.Add(urlBg);
             urlBg.SendToBack();
 
-            // Last typed utterance, shown as a quote with an accent bar.
+            // What was typed most recently, filling in as it arrives.
             var lastRow = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 52,
+                Height = QuoteRowHeight,
                 BackColor = Skin.Surface,
-                Padding = new Padding(0, 5, 0, 5)
+                Padding = new Padding(0, 8, 0, 2)
             };
-            // Only the left accent bar is painted; the fill belongs to the
-            // TextBox, which sits on top of it.
-            _lastCard = new PaintCard
+            _quote = new PaintQuote
             {
                 Dock = DockStyle.Fill,
-                Fill = Skin.AccentSoft,
-                Corner = 8,
-                Accent = Skin.Accent
+                Placeholder = "What you say appears here as it is typed"
             };
-            // A read-only TextBox cannot take Color.Transparent either, so the card
-            // behind it carries the colour instead.
-            _lastText = new TextBox
-            {
-                Dock = DockStyle.Fill,
-                Multiline = true,
-                ReadOnly = true,
-                ScrollBars = ScrollBars.None,
-                BorderStyle = BorderStyle.None,
-                BackColor = Skin.AccentSoft,
-                ForeColor = Skin.Ink,
-                Font = Skin.Quote,
-                TextAlign = HorizontalAlignment.Left,
-                Margin = new Padding(9, 3, 9, 3)
-            };
-            lastRow.Controls.Add(_lastText);
-            lastRow.Controls.Add(_lastCard);
-            _lastCard.SendToBack();
+            lastRow.Controls.Add(_quote);
 
             // ---- footer ----------------------------------------------------
             // Just the two buttons that still do something. The queue list, the
@@ -3102,27 +3619,30 @@ namespace DictationBridge
             var bottom = new TableLayoutPanel
             {
                 Dock = DockStyle.Bottom,
-                Height = 44,
+                Height = FooterHeight,
                 BackColor = Skin.Surface,
                 ColumnCount = 2,
                 RowCount = 1
             };
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
+            bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, FooterHeight));
 
-            var copyButton = SoftButtonOf("Copy pairing link", (s, e) => CopyPairingLink());
+            _copyButton = SoftButtonOf(CopyLabel, (s, e) => CopyPairingLink());
+            _copyButton.Margin = new Padding(0, 6, 4, 6);
             // Close() alone is swallowed by hide-to-tray, so quit is routed back
             // to the tray context which knows how to really exit.
             var quitButton = SoftButtonOf("Quit", (s, e) => Quit());
             quitButton.Ink = Skin.Danger;
+            quitButton.Margin = new Padding(4, 6, 0, 6);
 
-            bottom.Controls.Add(copyButton, 0, 0);
+            bottom.Controls.Add(_copyButton, 0, 0);
             bottom.Controls.Add(quitButton, 1, 0);
 
             // Everything below the strip must live inside _detail. Adding the
             // bottom bar to _body instead left its buttons drawn on top of the
-            // collapsed strip, where they swallowed clicks aimed for "+".
+            // collapsed strip, where they swallowed clicks aimed for the expand
+            // button.
             _detail.Controls.Add(bottom);
             _detail.Controls.Add(lastRow);
             _detail.Controls.Add(urlCard);
@@ -3131,16 +3651,34 @@ namespace DictationBridge
             _body.Controls.Add(_strip);
 
             host.Controls.Add(_body);
+            LayOutStrip();
             // Open on the QR code until a phone has paired: before that, the
             // code is the only thing on the panel worth looking at.
             _pairedAtStart = Pairing.Used;
             SetExpanded(!_pairedAtStart);
 
-            MakeDraggable(_strip);
-            MakeDraggable(_body);
-            MakeDraggable(_detail);
-            MakeDraggable(stripPad);
-            _phoneState.MouseDoubleClick += (s, e) => SetExpanded(!_expanded);
+            // Anything that is not a button or the address moves the panel.
+            foreach (Control c in new Control[] {
+                _strip, _lamp, _phoneState, _body, _detail, urlCard, urlBg, _qr,
+                caption, lastRow, _quote, bottom })
+            {
+                MakeDraggable(c);
+            }
+            MouseEventHandler toggle = (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left) SetExpanded(!_expanded);
+            };
+            _strip.MouseDoubleClick += toggle;
+            _lamp.MouseDoubleClick += toggle;
+            _phoneState.MouseDoubleClick += toggle;
+        }
+
+        private void LayOutStrip()
+        {
+            int width = _strip.ClientSize.Width;
+            _collapse.Location = new Point(width - _collapse.Width - 10,
+                (StripHeight - _collapse.Height) / 2);
+            _phoneState.Width = Math.Max(0, _collapse.Left - 6 - _phoneState.Left);
         }
 
         private static SoftButton SoftButtonOf(string text, EventHandler onClick)
@@ -3149,8 +3687,7 @@ namespace DictationBridge
             {
                 Text = text,
                 Dock = DockStyle.Fill,
-                Font = Skin.UiSmall,
-                Margin = new Padding(0, 6, 5, 6)
+                Font = Skin.UiSmall
             };
             b.Click += onClick;
             return b;
@@ -3164,29 +3701,66 @@ namespace DictationBridge
         }
 
         // A right-click anywhere on the panel opens the tray menu, so the app does
-        // not need two places that explain what it can do.
+        // not need two places that explain what it can do. Every control passes
+        // its right-click on: WinForms gives a click to the control under the
+        // mouse and never to its parent, so a handler on the form alone would
+        // work only on the few pixels that are genuinely the form.
         //
-        // Assigning the same ContextMenuStrip to the form and to every control under
-        // it is what makes "anywhere" actually true. WinForms sends WM_CONTEXTMENU
-        // to the control under the cursor and never routes it up to a parent, so
-        // setting it on the form alone would work only on the few pixels that are
-        // genuinely the form -- and the panel is almost entirely children. Setting
-        // it on each child also replaces that child's own right-click behaviour,
-        // which is the part that would otherwise show two menus at once: the read-
-        // only TextBox draws the native edit menu itself.
-        //
-        // One instance, not a copy per control: ToolStripMenuItem is not thread
-        // safe, and the tray icon is still using the same one. Assigning it also
-        // means Shift+F10 and the context-menu key work on the panel, which they
-        // did not before.
+        // One menu instance, shared with the tray icon rather than copied:
+        // ToolStripMenuItem is not thread safe, and two copies would drift apart.
         private void UsePanelMenu(Control root)
         {
             if (_panelMenu == null) return;
-            root.ContextMenuStrip = _panelMenu;
+            root.MouseUp += OnPanelMouseUp;
             foreach (Control child in root.Controls)
             {
                 UsePanelMenu(child);
             }
+        }
+
+        private void OnPanelMouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right) ShowMenu((Control)sender, e.Location);
+        }
+
+        // The menu is the one part of the panel that takes the focus. A menu on a
+        // window that is not in front does not close when you click somewhere
+        // else -- NotifyIcon brings its own window forward before it shows the
+        // tray menu for the same reason -- so the panel comes to the front while
+        // its menu is open, and hands the focus back to wherever it was when the
+        // menu closes, unless the item chosen opened a window of its own.
+        private void ShowMenu(Control source, Point at)
+        {
+            IntPtr before = Native.GetForegroundWindow();
+            _focusBeforeMenu = before == Handle ? IntPtr.Zero : before;
+            _menuKeepsFocus = false;
+            Native.SetForegroundWindow(Handle);
+            _panelMenu.Show(source, at);
+        }
+
+        private void OnMenuItemClicked(object sender, ToolStripItemClickedEventArgs e)
+        {
+            _menuKeepsFocus = e.ClickedItem != null && e.ClickedItem.Tag == KeepsFocus;
+        }
+
+        private void OnMenuClosed(object sender, ToolStripDropDownClosedEventArgs e)
+        {
+            if (_focusBeforeMenu == IntPtr.Zero) return;
+            // Queued, so it runs after the item's own Click handler.
+            try { BeginInvoke((MethodInvoker)ReturnFocus); }
+            catch (InvalidOperationException) { }
+        }
+
+        private void ReturnFocus()
+        {
+            IntPtr back = _focusBeforeMenu;
+            _focusBeforeMenu = IntPtr.Zero;
+            if (back == IntPtr.Zero || _menuKeepsFocus) return;
+            // Not if a click somewhere else closed the menu: that click has put
+            // the focus where it was wanted. Hiding the panel moves the focus
+            // too, to whatever Windows picks, so it is handed back then as well.
+            if (Visible && Native.GetForegroundWindow() != Handle) return;
+            if (Native.IsWindow(back)) Native.SetForegroundWindow(back);
         }
 
         // Rounded corners via a Region rather than a transparency key: the shape is
@@ -3209,8 +3783,6 @@ namespace DictationBridge
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint =
-                System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             using (SolidBrush b = new SolidBrush(Skin.Surface))
             {
                 g.FillRectangle(b, ClientRectangle);
@@ -3262,8 +3834,8 @@ namespace DictationBridge
             int y = Location.Y;
             if (x + Width < area.Left + 60) x = area.Left + 60 - Width;
             if (x > area.Right - 60) x = area.Right - 60;
-            if (y < area.Top) y = area.Top;
             if (y + Height > area.Bottom) y = area.Bottom - Height;
+            if (y < area.Top) y = area.Top;
             Location = new Point(x, y);
         }
 
@@ -3288,23 +3860,37 @@ namespace DictationBridge
             PerformLayout();
             foreach (Control c in _body.Controls) c.PerformLayout();
             _body.PerformLayout();
-            _collapse.Text = expanded ? "_" : "+";
+            string what = expanded ? "Hide the QR code" : "Show the QR code";
+            _collapse.Glyph = expanded ? ButtonGlyph.ChevronUp : ButtonGlyph.ChevronDown;
+            _collapse.AccessibleName = what;
+            _tips.SetToolTip(_collapse, what);
             _collapse.Invalidate();
             _strip.Invalidate();
+            // Opening downwards near the bottom of the screen would put the
+            // buttons out of reach.
+            if (expanded && IsHandleCreated) ClampIntoView();
         }
 
-        // The link carries the key, so the log only says that it was copied.
+        // The link carries the key, so the log only says that it was copied. The
+        // button says so as well, for a moment: nothing else on screen changes.
         public void CopyPairingLink()
         {
+            bool copied = false;
             try
             {
                 Clipboard.SetText(Pairing.Link(_url));
+                copied = true;
                 Log.Write("copied the pairing link");
             }
             catch (Exception e)
             {
                 Log.Write("WARN: could not copy the pairing link: " + e.Message);
             }
+            _copyButton.Text = copied ? "Copied" : "Could not copy";
+            _copyButton.Ink = copied ? Skin.Good : Skin.Danger;
+            _copyButton.Invalidate();
+            _copied.Stop();
+            _copied.Start();
         }
 
         // After a reset: the old code no longer works, so show the new one.
@@ -3326,40 +3912,36 @@ namespace DictationBridge
             if (_expanded) SetExpanded(false);
         }
 
+        // Changed is raised on whichever server thread answered the phone, and a
+        // control may only be touched from the thread that made it. The refresh
+        // used to run right there, on the server thread. It is queued to the
+        // panel's own thread instead, one at a time: polls that arrive while one
+        // is waiting ride along with it.
+        private void RefreshSoon()
+        {
+            if (Interlocked.Exchange(ref _refreshQueued, 1) == 1) return;
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    Interlocked.Exchange(ref _refreshQueued, 0);
+                    Refresh2();
+                });
+            }
+            catch (InvalidOperationException)
+            {
+                // No window yet, or none any more; the timer covers both.
+                Interlocked.Exchange(ref _refreshQueued, 0);
+            }
+        }
+
         private void Refresh2()
         {
             if (IsDisposed) return;
-            // The lamp and the label now track whether the phone is in touch,
-            // not whether an armed flag is set. There is no armed flag.
-            bool present = _bridge.PhonePresent;
-
-            if (_lamp != null)
-            {
-                _lamp.DotColor = present ? Skin.Accent : Skin.InkFaint;
-                _lamp.Breathe = present;
-                _lamp.Phase = _pulsePhase;
-                _lamp.Invalidate();
-            }
-
-            if (_phoneState != null)
-            {
-                string miss = _bridge.RecentMiss;
-                if (miss != null) _phoneState.Set(miss, Skin.Warn);
-                else if (present) _phoneState.Set("listening on the phone", Skin.Good);
-                else if (_bridge.RecentlyRefused) _phoneState.Set("phone not paired: scan the QR code", Skin.Warn);
-                else if (!Pairing.Used) _phoneState.Set("scan the QR code to pair", Skin.Warn);
-                else _phoneState.Set("tap Start on the phone", Skin.Warn);
-            }
-
-            _lastText.Text = _bridge.LastText;
-            if (_lastCard != null)
-            {
-                bool hasText = !string.IsNullOrEmpty(_bridge.LastText);
-                _lastCard.Accent = hasText ? Skin.Accent : (Color?)null;
-                _lastCard.Fill = hasText ? Skin.AccentSoft : Skin.Field;
-                _lastCard.Invalidate();
-                _lastText.BackColor = hasText ? Skin.AccentSoft : Skin.Field;
-            }
+            PanelStatus now = PanelStatus.Of(_bridge);
+            _lamp.Set(now.Dot, now.Breathe);
+            _phoneState.Set(now.Strip, now.Ink);
+            _quote.SetText(_bridge.LastText);
         }
     }
 
@@ -3367,12 +3949,21 @@ namespace DictationBridge
     {
         private readonly Bridge _bridge;
         private readonly NotifyIcon _tray;
+        private readonly MainForm _form;
+        private readonly System.Windows.Forms.Timer _timer;
+        // One icon per colour, made the first time it is needed and kept: the
+        // state is checked every second, and it is nearly always the same.
+        private readonly Dictionary<int, Icon> _icons = new Dictionary<int, Icon>();
+        private bool _reallyQuitting;
 
         public TrayContext(Bridge bridge, string url)
         {
             _bridge = bridge;
 
+            // DictationBridge.MainForm, qualified: in an ApplicationContext, plain
+            // MainForm is the context's own MainForm property.
             var quitItem = new ToolStripMenuItem("Quit");
+            quitItem.Tag = DictationBridge.MainForm.KeepsFocus;
             quitItem.Click += (s, e) =>
             {
                 _reallyQuitting = true;
@@ -3386,6 +3977,7 @@ namespace DictationBridge
             // window finding it means hunting through AppData-style folders. Put
             // it one click away and select the file, ready to attach.
             var logItem = new ToolStripMenuItem("Show the log file");
+            logItem.Tag = DictationBridge.MainForm.KeepsFocus;
             logItem.Click += (s, e) =>
             {
                 try
@@ -3406,11 +3998,19 @@ namespace DictationBridge
             var copyItem = new ToolStripMenuItem("Copy pairing link");
             copyItem.Click += (s, e) => _form.CopyPairingLink();
 
+            // It asks first, in a dialog that needs the focus.
             var resetItem = new ToolStripMenuItem("Reset phone pairing...");
+            resetItem.Tag = DictationBridge.MainForm.KeepsFocus;
             resetItem.Click += (s, e) => ResetPairing();
 
-            var showItem = new ToolStripMenuItem("Show window");
-            showItem.Click += (s, e) => ShowWindow();
+            // Hide as well as show. The panel never takes the focus, so Alt+F4
+            // cannot reach it; this is the way to put it away.
+            var showItem = new ToolStripMenuItem("Hide the panel");
+            showItem.Click += (s, e) =>
+            {
+                if (_form.Visible) _form.Hide();
+                else ShowWindow();
+            };
 
             // No arm item and no buffer item: the phone's Start button is the only
             // on/off switch, and there is nothing to hold text for, because
@@ -3423,15 +4023,23 @@ namespace DictationBridge
             menu.Items.Add(logItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(quitItem);
+            menu.Opening += (s, e) =>
+            {
+                showItem.Text = _form.Visible ? "Hide the panel" : "Show the panel";
+            };
 
             _tray = new NotifyIcon
             {
-                Icon = SystemIcons.Application,
+                Icon = IconFor(Skin.InkFaint),
                 Text = "Dictation Bridge",
                 ContextMenuStrip = menu,
                 Visible = true
             };
-            _tray.DoubleClick += (s, e) => ShowWindow();
+            // One click, as the README has always said. It used to take two.
+            _tray.MouseClick += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left) ShowWindow();
+            };
 
             _form = new MainForm(_bridge, url, menu);
             _form.QuitRequested += () =>
@@ -3440,7 +4048,7 @@ namespace DictationBridge
                 Log.SetReason("quit from the panel");
                 ExitThread();
             };
-            _form.Show();
+            _form.ShowQuietly();
             _form.FormClosing += (s, e) =>
             {
                 if (e.CloseReason == CloseReason.UserClosing && !_reallyQuitting)
@@ -3451,13 +4059,10 @@ namespace DictationBridge
             };
 
             Update();
-            System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 1000 };
-            timer.Tick += (s, e) => Update();
-            timer.Start();
+            _timer = new System.Windows.Forms.Timer { Interval = 1000 };
+            _timer.Tick += (s, e) => Update();
+            _timer.Start();
         }
-
-        private readonly MainForm _form;
-        private bool _reallyQuitting;
 
         // Asks first: every phone that scanned the old code stops typing until
         // it scans the new one, and there is no undo.
@@ -3475,37 +4080,95 @@ namespace DictationBridge
             ShowWindow();
         }
 
+        // Brings the panel back without taking the focus from the window being
+        // typed into. It used to activate it, which did.
         private void ShowWindow()
         {
             if (_form.WindowState == FormWindowState.Minimized)
             {
                 _form.WindowState = FormWindowState.Normal;
             }
-            _form.Show();
-            _form.Activate();
-            _form.BringToFront();
+            _form.ShowQuietly();
         }
 
         private void Update()
         {
-            // "typing" rather than "armed": the armed/buffered wording described a
-            // gate that no longer exists. What the tooltip can honestly report is
-            // whether the phone is still in touch.
-            string miss = _bridge.RecentMiss;
-            string status = miss != null ? miss
-                : _bridge.PhonePresent ? "typing"
-                : _bridge.RecentlyRefused ? "phone not paired, scan the QR code"
-                : !Pairing.Used ? "scan the QR code to pair"
-                : "waiting for the phone";
-            string tip = "Dictation Bridge: " + status;
+            PanelStatus now = PanelStatus.Of(_bridge);
+            string tip = "Dictation Bridge: " + now.Tip;
             if (tip.Length > 63) tip = tip.Substring(0, 63);
-            _tray.Text = tip;
+            // Only on a change: each one is a call into the shell.
+            if (_tray.Text != tip) _tray.Text = tip;
+            Icon icon = IconFor(now.Dot);
+            if (!ReferenceEquals(_tray.Icon, icon)) _tray.Icon = icon;
+        }
+
+        // A white microphone on a dot of the strip's colour, so the state shows
+        // without hovering. It used to be the stock application icon, the blank
+        // window that plenty of other programs in the tray show as well.
+        private Icon IconFor(Color color)
+        {
+            Icon icon;
+            if (_icons.TryGetValue(color.ToArgb(), out icon)) return icon;
+            Size size = SystemInformation.SmallIconSize;
+            using (var bmp = new Bitmap(size.Width, size.Height,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    PaintTrayIcon(g, size.Width, color);
+                }
+                // GetHicon makes a handle that an Icon from FromHandle does not
+                // own. The clone owns a copy, and the original is destroyed here
+                // rather than leaked.
+                IntPtr handle = bmp.GetHicon();
+                try
+                {
+                    using (Icon borrowed = Icon.FromHandle(handle))
+                    {
+                        icon = (Icon)borrowed.Clone();
+                    }
+                }
+                finally
+                {
+                    Native.DestroyIcon(handle);
+                }
+            }
+            _icons[color.ToArgb()] = icon;
+            return icon;
+        }
+
+        internal static void PaintTrayIcon(Graphics g, int side, Color color)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+            float k = side / 16F;
+            using (var dot = new SolidBrush(color))
+            {
+                g.FillEllipse(dot, 0.5F * k, 0.5F * k, 15F * k, 15F * k);
+            }
+            using (var white = new SolidBrush(Color.White))
+            using (var pen = new Pen(Color.White, 1.3F * k))
+            using (var capsule = new GraphicsPath())
+            {
+                float w = 4F * k;
+                float x = 8F * k - w / 2;
+                capsule.AddArc(x, 3F * k, w, w, 180, 180);
+                capsule.AddArc(x, 9.5F * k - w, w, w, 0, 180);
+                capsule.CloseFigure();
+                g.FillPath(white, capsule);
+                // The cradle round it, and the stand.
+                g.DrawArc(pen, 4.75F * k, 4.5F * k, 6.5F * k, 6.5F * k, 0, 180);
+                g.DrawLine(pen, 8F * k, 11F * k, 8F * k, 13F * k);
+            }
         }
 
         protected override void ExitThreadCore()
         {
+            _timer.Stop();
             _tray.Visible = false;
             _tray.Dispose();
+            foreach (Icon icon in _icons.Values) icon.Dispose();
+            _icons.Clear();
             base.ExitThreadCore();
         }
     }

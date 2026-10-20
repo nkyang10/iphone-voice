@@ -108,10 +108,12 @@ the rewrite, so it is never typed twice, and the sentence continues in order.
 | | |
 | --- | --- |
 | Start / stop typing | **Start listening** on the phone page |
-| See if it is really hearing you | The Start button: **greyed out** means the microphone is open |
+| See if it is really hearing you | The Start button: **greyed out** means the microphone is open. On the PC, the panel's dot breathes green |
 | Open the page on the phone | Scan the QR code in the panel. It pairs the phone too |
 | Unpair every phone | Right-click the panel, **Reset phone pairing...**, then scan the new code |
-| See the panel again | Click the tray icon |
+| Put the panel away | Right-click it, **Hide the panel**. Click the tray icon to bring it back |
+| Click the panel while you dictate | Go ahead: it never takes the focus, so the words keep going to your window |
+| Copy the pairing link | Click the address in the panel |
 | Anything the tray icon can do | Right-click anywhere on the panel — same menu |
 | Move the panel | Drag it. It remembers where you left it |
 | See what you said last | Shown in the panel as soon as it arrives |
@@ -136,15 +138,19 @@ setting worth changing.
 
 ## What it looks like in use
 
-The panel, collapsed to a single strip. The dot breathes while the phone is in touch:
+The panel, collapsed to a single strip. The dot breathes green while the phone is
+listening. It is blue while the page is open but not listening, grey with no phone, and
+amber when something needs you, such as words that were not typed. The tray icon takes the
+same colour:
 
 <p align="center">
   <img src="docs/panel-collapsed.png" width="320" alt="Collapsed panel">
 </p>
 
-Expand it with the **+** for the QR code that pairs the phone, the address it points to,
-and what was typed most recently, filling in as you speak. Until a phone has paired, the
-panel opens expanded on the QR code, and it folds itself away once one has.
+Expand it with the arrow on the right, or a double-click, for the QR code that pairs the
+phone, the address it points to (click it to copy the pairing link), and the newest words
+typed, filling in as you speak. Until a phone has paired, the panel opens expanded on the
+QR code, and it folds itself away once one has.
 
 ## Files it creates
 
@@ -283,8 +289,9 @@ does not turn into a wrong sentence.
 
 **Nothing appears in the target program.**
 The phone page says why as soon as it happens: the window in front is running as
-administrator, no window has the focus (the PC is locked or asleep), or the Dictation
-Bridge panel itself had the focus. Click into the window you want and say it again. Words
+administrator, no window has the focus (the PC is locked or asleep), or a Dictation
+Bridge window had it: the panel's menu, or the reset prompt. Clicking the panel itself
+does not take the focus. Click into the window you want and say it again. Words
 that were not typed are struck through in the phone's transcript and are not sent again
 on their own, because they would land in whichever window had the focus by then. The
 panel's status line says the same for a few seconds.
