@@ -402,6 +402,17 @@ button {
   //   down      not answering at all
   var link = 'checking';
 
+  // A PC that stays silent needs a reason and something to try, not only a red
+  // dot. Not straight away: one lost poll on a busy Wi-Fi is not news. The page
+  // cannot tell a PC that is off from one serving a certificate this phone does
+  // not trust yet, so the text covers both, in the panel's own words.
+  var DOWN_HINT_MS = 15000;
+  var DOWN_TEXT = 'The PC has not answered for a while. Check that Dictation Bridge is ' +
+    'running on it and that this phone is on the same Wi-Fi. If its panel says new ' +
+    'certificate or new address, install the new certificate on this phone or scan ' +
+    'the new QR code.';
+  var downTimer = null;
+
   function setLink(state) {
     if (state === link) return;
     note('link', link + ' -> ' + state);
@@ -423,6 +434,12 @@ button {
         'Typing the address by hand opens this page, but only the code carries the pairing key.';
     el.pairWarn.textContent = pairMsg;
     el.pairWarn.className = pairMsg ? 'warnbox show' : 'warnbox';
+    clearTimeout(downTimer);
+    downTimer = state !== 'down' ? null : setTimeout(function () {
+      if (link !== 'down') return;
+      el.pairWarn.textContent = DOWN_TEXT;
+      el.pairWarn.className = 'warnbox show';
+    }, DOWN_HINT_MS);
   }
 
   // ---- streaming outbox ----------------------------------------------------

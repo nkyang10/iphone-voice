@@ -318,6 +318,12 @@ namespace DictationBridge
     {
         public const string PfxPassword = "dictation-bridge";
 
+        // How many addresses a certificate lists besides 127.0.0.1. Each new
+        // certificate carries the old one's addresses forward, newest first, so
+        // this is also how many networks a PC can visit before the oldest drops
+        // off the list.
+        private const int MaxAddresses = 16;
+
         // Self-signed, and that is the floor rather than a preference. Safari
         // only exposes SpeechRecognition on a secure origin, so plain HTTP cannot
         // be used here at all, and iOS has no "proceed anyway" button the way
@@ -326,48 +332,131 @@ namespace DictationBridge
         // local trust store, and installing that root on a user's PC is not
         // something this app should do silently.
         //
-        // Known limitation: if the machine's address changes to one the SAN does
-        // not already list, the certificate is regenerated and the phone must
-        // install the new one.
-        public static X509Certificate2 Ensure(string ip, out string cerPath)
+        // The phone trusts this certificate itself, so every replacement means
+        // installing the new one on the phone. It is replaced only when it does
+        // not list the address in the QR code, or is a month from expiring.
+        // replaced says that a certificate the phone may already trust was
+        // thrown away, which is when the person has to be told.
+        public static X509Certificate2 Ensure(string ip, out string cerPath, out bool replaced)
         {
             string pfxPath = Store.File("dictation-bridge.pfx");
-            string caCerPath = Store.File("dictation-bridge.cer");
-            cerPath = caCerPath;
+            cerPath = Store.File("dictation-bridge.cer");
+            replaced = false;
 
-            // Reuse the saved certificate unless it is about to expire or it does
-            // not cover today's address. The SAN carries the stable .local name as
-            // well as every current IP, so a phone using either keeps working.
             X509Certificate2 existing = Load(pfxPath);
-            if (existing != null && Covers(existing, ip)
-                && existing.NotAfter > DateTime.Now.AddDays(30))
+            if (existing == null && System.IO.File.Exists(pfxPath))
             {
-                Log.Write("reusing certificate " + existing.Thumbprint);
-                return existing;
+                // There was one, so the phone may trust it; Load said why it
+                // could not be read.
+                Log.Write("  the phone has to install the new " + System.IO.Path.GetFileName(cerPath) +
+                          " once");
+                replaced = true;
             }
-
             if (existing != null)
             {
-                // Worth saying out loud: this is the one case that makes the
-                // phone ask to trust a new certificate.
-                Log.Write("address " + ip + " is not covered by the saved " +
-                          "certificate; issuing a new one");
-                Log.Write("  if the phone already trusted the old one, it will " +
-                          "reject this until " + StableName +
-                          " or the new .cer is installed again");
+                bool covers = Covers(existing, ip);
+                if (covers && existing.NotAfter > DateTime.Now.AddDays(30))
+                {
+                    Log.Write("reusing certificate " + existing.Thumbprint + ", which covers " +
+                              DescribeSan(existing));
+                    // Only a person reads the .cer, and they may have tidied it
+                    // away; it is the public half, so it can be written again.
+                    if (!System.IO.File.Exists(cerPath)) WriteCer(existing, cerPath);
+                    return existing;
+                }
+
+                // The one case that makes the phone install a certificate again,
+                // so say exactly why.
+                if (!covers)
+                {
+                    Log.Write("address " + ip + " is not in the saved certificate, which covers " +
+                              DescribeSan(existing) + "; issuing a new one");
+                }
+                else
+                {
+                    Log.Write("the saved certificate expires on " +
+                              existing.NotAfter.ToString("yyyy-MM-dd") + "; issuing a new one");
+                }
+                Log.Write("  the phone has to install the new " + System.IO.Path.GetFileName(cerPath) +
+                          " once. It lists the old addresses as well, so going back to one of" +
+                          " them will not need another");
+                replaced = true;
             }
 
-            Log.Write("generating certificate for " + ip);
-            X509Certificate2 cert = CreateLeaf(ip);
-            System.IO.File.WriteAllBytes(pfxPath,
-                cert.Export(X509ContentType.Pfx, PfxPassword));
-            System.IO.File.WriteAllBytes(caCerPath, cert.Export(X509ContentType.Cert));
+            List<IPAddress> addresses = AddressesFor(ip, existing);
+            if (existing != null) existing.Dispose();
+            Log.Write("generating a certificate for " + ip);
+            X509Certificate2 cert = CreateLeaf(addresses);
+            System.IO.File.WriteAllBytes(pfxPath, cert.Export(X509ContentType.Pfx, PfxPassword));
+            WriteCer(cert, cerPath);
             Log.Write("certificate " + cert.Thumbprint + " covers " + DescribeSan(cert));
+            cert.Dispose();
 
             return Load(pfxPath);
         }
 
-        private static X509Certificate2 CreateLeaf(string ip)
+        // The addresses the saved certificate lists, so that of two equally good
+        // addresses the one the phone already trusts goes in the QR code. Empty
+        // when there is no certificate yet.
+        public static List<IPAddress> SavedAddresses()
+        {
+            using (X509Certificate2 saved = Load(Store.File("dictation-bridge.pfx")))
+            {
+                return saved == null ? new List<IPAddress>() : AddressesIn(saved);
+            }
+        }
+
+        private static void WriteCer(X509Certificate2 cert, string cerPath)
+        {
+            try
+            {
+                System.IO.File.WriteAllBytes(cerPath, cert.Export(X509ContentType.Cert));
+            }
+            catch (Exception e)
+            {
+                Log.Write("WARN: could not write " + cerPath + ": " + e.Message);
+            }
+        }
+
+        // What a new certificate lists: the address in the QR code, this PC's
+        // other addresses that a phone could reach, then everything the
+        // certificate it replaces listed. A laptop that moves between home and
+        // the office settles on one certificate that covers both, instead of
+        // asking the phone for a new one at every move.
+        private static List<IPAddress> AddressesFor(string ip, X509Certificate2 previous)
+        {
+            var list = new List<IPAddress>();
+            IPAddress chosen;
+            if (IPAddress.TryParse(ip, out chosen)) AddAddress(list, chosen);
+            foreach (Addresses.Candidate c in Addresses.Scan())
+            {
+                if (!c.Virtual) AddAddress(list, c.Address);
+            }
+            if (previous != null)
+            {
+                foreach (IPAddress a in AddressesIn(previous)) AddAddress(list, a);
+            }
+            if (list.Count > MaxAddresses) list.RemoveRange(MaxAddresses, list.Count - MaxAddresses);
+            return list;
+        }
+
+        private static void AddAddress(List<IPAddress> list, IPAddress a)
+        {
+            if (a.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(a)) return;
+            foreach (IPAddress b in list)
+            {
+                if (b.Equals(a)) return;
+            }
+            list.Add(a);
+        }
+
+        // Five years, which is longer than the 825 days Apple allows a TLS
+        // certificate, and that is fine: the limit is not applied to a
+        // certificate the user installed and trusted as its own root, which is
+        // exactly what this one is (trustd skips "user-anchored leafs"). Do not
+        // shorten it to satisfy a rule that does not apply; every renewal is a
+        // reinstall on the phone.
+        private static X509Certificate2 CreateLeaf(List<IPAddress> addresses)
         {
             using (RSA rsa = RSA.Create(2048))
             {
@@ -375,8 +464,13 @@ namespace DictationBridge
                     "CN=Dictation Bridge", rsa,
                     HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
+                // The phone checks the address it connected to against this
+                // list, and the QR code always carries an address. localhost and
+                // 127.0.0.1 are for trying the page on the PC itself.
                 var san = new SubjectAlternativeNameBuilder();
-                AddLocalAddresses(san);
+                san.AddDnsName("localhost");
+                san.AddIpAddress(IPAddress.Loopback);
+                foreach (IPAddress a in addresses) san.AddIpAddress(a);
                 request.CertificateExtensions.Add(san.Build());
                 request.CertificateExtensions.Add(
                     new X509BasicConstraintsExtension(false, false, 0, false));
@@ -409,55 +503,6 @@ namespace DictationBridge
             }
         }
 
-        // Every address the phone might legitimately use goes into the SAN, so a
-        // name mismatch on the socket port cannot happen.
-        // Stable name for the app, so the certificate survives a change of
-        // address. iOS resolves .local names through Bonjour, so if this
-        // machine is visible that way the phone can use the name instead of the
-        // IP and one installed certificate keeps working on every network.
-        public const string StableName = "dictation-bridge.local";
-
-        public static void AddLocalAddresses(SubjectAlternativeNameBuilder san)
-        {
-            san.AddDnsName(StableName);
-            san.AddDnsName(StaleHostName);
-            san.AddIpAddress(IPAddress.Loopback);
-            san.AddDnsName("localhost");
-            try
-            {
-                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
-                {
-                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-                    foreach (UnicastIPAddressInformation ua in ni.GetIPProperties().UnicastAddresses)
-                    {
-                        if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-                        if (IPAddress.IsLoopback(ua.Address)) continue;
-                        san.AddIpAddress(ua.Address);
-                    }
-                }
-            }
-            catch (Exception) { }
-        }
-
-        // The old computer name is kept in the SAN as well, because it rarely
-        // changes and a phone may still be using it.
-        public static string StaleHostName
-        {
-            get
-            {
-                try
-                {
-                    string n = System.Net.Dns.GetHostName();
-                    if (string.IsNullOrEmpty(n)) return "unused.local";
-                    int dot = n.IndexOf('.');
-                    if (dot > 0) n = n.Substring(0, dot);
-                    return n + ".local";
-                }
-                catch (Exception) { return "unused.local"; }
-            }
-        }
-
         public static string Describe(X509Certificate2 cert)
         {
             if (cert == null) return "none";
@@ -466,28 +511,368 @@ namespace DictationBridge
 
         public static string DescribeSan(X509Certificate2 cert)
         {
-            var parts = new List<string>();
-            foreach (X509Extension ext in cert.Extensions)
-            {
-                if (ext.Oid.Value != "2.5.29.17") continue;
-                parts.Add(ext.Format(false).Replace("\r", " ").Replace("\n", " "));
-            }
-            return string.Join(" ", parts.ToArray());
+            var names = new List<string>();
+            var addresses = new List<IPAddress>();
+            ReadSan(cert, names, addresses);
+            foreach (IPAddress a in addresses) names.Add(a.ToString());
+            return names.Count == 0 ? "nothing" : string.Join(", ", names.ToArray());
         }
 
-        // True when the certificate is good for today: it either carries the
-        // address, or it carries the stable name, in which case the phone can be
-        // reached without the address mattering.
-        private static bool Covers(X509Certificate2 cert, string ip)
+        // True only when the certificate lists the address itself, because that
+        // is what the phone checks.
+        //
+        // This used to search the text of X509Extension.Format, which differs
+        // between Windows versions and display languages, and it counted any
+        // certificate listing dictation-bridge.local as covering every address.
+        // Every certificate listed it, so none was ever replaced: a PC that
+        // moved to a new address kept serving a certificate that did not match
+        // it, and installing that certificate again could not help. Nothing ever
+        // published that name, either, so it is no longer in the list.
+        internal static bool Covers(X509Certificate2 cert, string ip)
         {
-            foreach (X509Extension ext in cert.Extensions)
+            IPAddress want;
+            if (cert == null || !IPAddress.TryParse(ip, out want)) return false;
+            foreach (IPAddress a in AddressesIn(cert))
             {
-                if (ext.Oid.Value != "2.5.29.17") continue;
-                string text = ext.Format(false);
-                if (text.Contains("DNS Name=" + StableName)) return true;
-                if (text.Contains(ip)) return true;
+                if (a.Equals(want)) return true;
             }
             return false;
+        }
+
+        internal static List<IPAddress> AddressesIn(X509Certificate2 cert)
+        {
+            var names = new List<string>();
+            var addresses = new List<IPAddress>();
+            ReadSan(cert, names, addresses);
+            return addresses;
+        }
+
+        // The names and addresses in the certificate's subjectAltName.
+        internal static void ReadSan(X509Certificate2 cert, List<string> names, List<IPAddress> addresses)
+        {
+            try
+            {
+                foreach (X509Extension ext in cert.Extensions)
+                {
+                    if (ext.Oid != null && ext.Oid.Value == "2.5.29.17") ReadSan(ext.RawData, names, addresses);
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Quiet("could not read a certificate's addresses: " + e.Message);
+            }
+        }
+
+        // The extension's DER: a SEQUENCE of GeneralName, where [2] is a DNS
+        // name and [7] an IP address of four or sixteen bytes. Anything else is
+        // skipped, and anything malformed ends the list where it is.
+        internal static void ReadSan(byte[] der, List<string> names, List<IPAddress> addresses)
+        {
+            int pos = 0, tag, length;
+            if (der == null || !ReadTag(der, ref pos, der.Length, out tag, out length) || tag != 0x30) return;
+            int end = pos + length;
+            while (pos < end)
+            {
+                if (!ReadTag(der, ref pos, end, out tag, out length)) break;
+                if (tag == 0x82)
+                {
+                    names.Add(Encoding.ASCII.GetString(der, pos, length));
+                }
+                else if (tag == 0x87 && (length == 4 || length == 16))
+                {
+                    var bytes = new byte[length];
+                    Array.Copy(der, pos, bytes, 0, length);
+                    addresses.Add(new IPAddress(bytes));
+                }
+                pos += length;
+            }
+        }
+
+        // One DER tag and length, leaving pos on the first byte of the value.
+        // False for anything malformed, or that would run past end.
+        private static bool ReadTag(byte[] der, ref int pos, int end, out int tag, out int length)
+        {
+            tag = 0;
+            length = 0;
+            if (der == null || end > der.Length || pos + 2 > end) return false;
+            tag = der[pos++];
+            // Tag numbers above 30 take extra bytes; a SAN never uses them.
+            if ((tag & 0x1F) == 0x1F) return false;
+            int first = der[pos++];
+            if (first < 0x80)
+            {
+                length = first;
+            }
+            else
+            {
+                int count = first & 0x7F;
+                if (count == 0 || count > 3 || pos + count > end) return false;
+                for (int i = 0; i < count; i++) length = (length << 8) | der[pos++];
+            }
+            return length <= end - pos;
+        }
+    }
+
+    // Which of this PC's addresses goes in the QR code, and following it when
+    // it changes.
+    //
+    // It used to be the first IPv4 address on the first adapter whose name did
+    // not look virtual, in whatever order Windows listed them, chosen once at
+    // startup. A VPN or a second adapter could put an address the phone cannot
+    // reach in the code, and a laptop that woke up on another network kept
+    // showing the old address until the app was restarted.
+    internal static class Addresses
+    {
+        internal sealed class Candidate
+        {
+            public IPAddress Address;
+            public string Adapter;
+            // A default gateway: the adapter is on the network with the router,
+            // which is nearly always the one the phone is on as well.
+            public bool Gateway;
+            public bool Virtual;
+            public bool Private;
+            public bool Physical;
+            // Listed in the saved certificate, so the phone already trusts it.
+            public bool Trusted;
+        }
+
+        // Adapter names that mean a virtual machine, a container, a VPN or a
+        // tether: something a phone on the Wi-Fi cannot reach.
+        private static readonly string[] VirtualWords =
+        {
+            "vmware", "virtualbox", "hyper-v", "vethernet", "wsl", "docker", "loopback",
+            "bluetooth", "tap-", "vpn", "wireguard", "tailscale", "zerotier", "hamachi", "npcap"
+        };
+
+        private static readonly object Gate = new object();
+        private static string _current = "127.0.0.1";
+        private static bool _fixed;
+        private static string _scheme = "https";
+        private static int _port;
+
+        // The address in the QR code now.
+        public static string Current
+        {
+            get { lock (Gate) { return _current; } }
+        }
+
+        // The page's address, which is what the QR code carries before the key.
+        public static string Url
+        {
+            get { lock (Gate) { return _scheme + "://" + _current + ":" + _port + "/"; } }
+        }
+
+        public static void Serving(string scheme, int port)
+        {
+            lock (Gate)
+            {
+                _scheme = scheme;
+                _port = port;
+            }
+        }
+
+        // At startup. requested is what --address said, if anything, and it is
+        // used exactly as given and never moved.
+        public static string Choose(string requested)
+        {
+            List<Candidate> all = Scan();
+            Candidate best = Pick(all, null, Certs.SavedAddresses());
+            Log.Write("addresses: " + Describe(all));
+            string ip;
+            if (requested != null)
+            {
+                bool mine = false;
+                foreach (Candidate c in all)
+                {
+                    if (c.Address.ToString() == requested) mine = true;
+                }
+                ip = requested;
+                Log.Write("address: " + ip + ", chosen with --address" + (mine ? "" :
+                    ". It is not one of this PC's, so the phone has to reach it some other way"));
+            }
+            else if (best != null)
+            {
+                ip = best.Address.ToString();
+                Log.Write("address: " + ip);
+                if (best.Virtual)
+                {
+                    Log.Write("WARN: only virtual adapters have an address, so the phone may not " +
+                              "reach it. Start with --address to choose one");
+                }
+            }
+            else
+            {
+                ip = "127.0.0.1";
+                Log.Write("WARN: no usable IPv4 address, so the QR code says 127.0.0.1, which a " +
+                          "phone cannot reach. It moves as soon as the network is up");
+            }
+            lock (Gate)
+            {
+                _current = ip;
+                _fixed = requested != null;
+            }
+            return ip;
+        }
+
+        // After Windows says an address came or went. Returns the new address
+        // when the QR code has to change, and null when it does not. Runs on a
+        // worker thread, because making a certificate takes a moment.
+        // newCertificate says the phone has to install a new one as well.
+        public static string Follow(out bool newCertificate)
+        {
+            newCertificate = false;
+            lock (Gate)
+            {
+                if (_fixed) return null;
+                List<Candidate> all = Scan();
+                Candidate next = Pick(all, _current, Certs.SavedAddresses());
+                // No network at all, usually for a moment: keep the old code up,
+                // since the same address is the likeliest thing to come back.
+                if (next == null) return null;
+                string ip = next.Address.ToString();
+                if (ip == _current) return null;
+
+                Log.Write("address changed from " + _current + " to " + ip + "; addresses: " +
+                          Describe(all));
+                if (Servers.Secure)
+                {
+                    string cerPath;
+                    bool replaced;
+                    X509Certificate2 cert = Certs.Ensure(ip, out cerPath, out replaced);
+                    if (cert == null)
+                    {
+                        Log.Write("WARN: no certificate for " + ip + ", so the QR code stays on " + _current);
+                        return null;
+                    }
+                    // Whether the phone has to install one is down to what it is
+                    // served, not to what Ensure did: a .pfx deleted while the app
+                    // ran gives a new certificate that replaced nothing on disk.
+                    newCertificate = Servers.UseCertificate(cert);
+                }
+                _current = ip;
+                return ip;
+            }
+        }
+
+        public static List<Candidate> Scan()
+        {
+            var list = new List<Candidate>();
+            NetworkInterface[] adapters;
+            try
+            {
+                adapters = NetworkInterface.GetAllNetworkInterfaces();
+            }
+            catch (Exception e)
+            {
+                Log.Write("WARN: could not list the network adapters: " + e.Message);
+                return list;
+            }
+            foreach (NetworkInterface ni in adapters)
+            {
+                // One adapter that cannot be read should not hide the others.
+                try { Add(list, ni); }
+                catch (Exception e) { Log.Quiet("skipped adapter " + ni.Name + ": " + e.Message); }
+            }
+            return list;
+        }
+
+        private static void Add(List<Candidate> list, NetworkInterface ni)
+        {
+            if (ni.OperationalStatus != OperationalStatus.Up) return;
+            NetworkInterfaceType type = ni.NetworkInterfaceType;
+            if (type == NetworkInterfaceType.Loopback || type == NetworkInterfaceType.Tunnel) return;
+
+            IPInterfaceProperties props = ni.GetIPProperties();
+            bool gateway = false;
+            foreach (GatewayIPAddressInformation g in props.GatewayAddresses)
+            {
+                if (g.Address.AddressFamily == AddressFamily.InterNetwork &&
+                    !g.Address.Equals(IPAddress.Any)) gateway = true;
+            }
+            string words = (ni.Name + " " + ni.Description).ToLowerInvariant();
+            bool isVirtual = false;
+            foreach (string w in VirtualWords)
+            {
+                if (words.Contains(w)) isVirtual = true;
+            }
+            bool physical = type == NetworkInterfaceType.Wireless80211 ||
+                type == NetworkInterfaceType.Ethernet || type == NetworkInterfaceType.GigabitEthernet ||
+                type == NetworkInterfaceType.FastEthernetT || type == NetworkInterfaceType.FastEthernetFx;
+
+            foreach (UnicastIPAddressInformation ua in props.UnicastAddresses)
+            {
+                IPAddress a = ua.Address;
+                if (a.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(a)) continue;
+                byte[] b = a.GetAddressBytes();
+                // 169.254.x.x is what Windows gives itself when nothing answered.
+                if (b[0] == 169 && b[1] == 254) continue;
+                list.Add(new Candidate
+                {
+                    Address = a,
+                    Adapter = ni.Name,
+                    Gateway = gateway,
+                    Virtual = isVirtual,
+                    // What home and office networks hand out. 100.64/10 is not
+                    // one of them: it is carrier NAT, and Tailscale.
+                    Private = b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) ||
+                              (b[0] == 192 && b[1] == 168),
+                    Physical = physical
+                });
+            }
+        }
+
+        // The address for the QR code. The one already in it stays for as long
+        // as this PC has it, even when a better one turns up, so plugging in a
+        // cable does not strand a phone that is working. Otherwise the best one
+        // by Better, and of two equals the one Windows listed first. Null when
+        // there is nothing to choose from.
+        internal static Candidate Pick(List<Candidate> all, string current, List<IPAddress> trusted)
+        {
+            Candidate best = null;
+            foreach (Candidate c in all)
+            {
+                c.Trusted = false;
+                foreach (IPAddress t in trusted)
+                {
+                    if (t.Equals(c.Address)) c.Trusted = true;
+                }
+            }
+            foreach (Candidate c in all)
+            {
+                if (current != null && c.Address.ToString() == current) return c;
+                if (best == null || Better(c, best)) best = c;
+            }
+            return best;
+        }
+
+        // Each test only settles a tie in the ones before it.
+        private static bool Better(Candidate a, Candidate b)
+        {
+            if (a.Gateway != b.Gateway) return a.Gateway;
+            if (a.Virtual != b.Virtual) return !a.Virtual;
+            if (a.Private != b.Private) return a.Private;
+            if (a.Physical != b.Physical) return a.Physical;
+            if (a.Trusted != b.Trusted) return a.Trusted;
+            return false;
+        }
+
+        // For the log, so a wrong pick can be explained from it.
+        internal static string Describe(List<Candidate> all)
+        {
+            if (all.Count == 0) return "none";
+            var parts = new List<string>();
+            foreach (Candidate c in all)
+            {
+                var notes = new List<string>();
+                if (c.Gateway) notes.Add("router");
+                if (c.Virtual) notes.Add("virtual");
+                if (!c.Private) notes.Add("not a private address");
+                if (c.Trusted) notes.Add("in the certificate");
+                parts.Add(c.Address + " on " + c.Adapter +
+                          (notes.Count > 0 ? " (" + string.Join(", ", notes.ToArray()) + ")" : ""));
+            }
+            return string.Join("; ", parts.ToArray());
         }
     }
 
@@ -1148,9 +1533,21 @@ namespace DictationBridge
         Listening
     }
 
+    // Something the phone has to do before it can carry on, which the panel
+    // says until a status poll shows it has been done. In order of weight: a
+    // new certificate needs installing and scanning, a new address only
+    // scanning.
+    internal enum Notice
+    {
+        None,
+        NewAddress,
+        NewCertificate
+    }
+
     internal sealed class Bridge
     {
         private readonly object _gate = new object();
+        private Notice _notice;
         private int _typedCount;
         private int _missedCount;
         private string _recentTyped = "";
@@ -1243,6 +1640,22 @@ namespace DictationBridge
             RaiseChanged();
         }
 
+        // Cleared by the next status poll: a page that gets one through has
+        // the certificate and the address, whatever it had before.
+        public Notice PendingNotice
+        {
+            get { lock (_gate) { return _notice; } }
+        }
+
+        public void Notify(Notice notice)
+        {
+            lock (_gate)
+            {
+                if (notice > _notice) _notice = notice;
+            }
+            RaiseChanged();
+        }
+
         public event Action Changed;
 
         private void RaiseChanged()
@@ -1267,6 +1680,7 @@ namespace DictationBridge
             {
                 firstContact = _lastSeen == DateTime.MinValue;
                 _lastSeen = DateTime.UtcNow;
+                _notice = Notice.None;
                 _phoneListening = state == "listening" ? true
                     : state == "idle" ? false : (bool?)null;
             }
@@ -1458,14 +1872,14 @@ namespace DictationBridge
         // port keeps a single, proven TLS path.
         public static int StartAll(Bridge bridge, int port, byte[] pfx, bool allowFallback)
         {
-            // One certificate for the life of the process. Per-connection imports
-            // made things worse, not better.
-            X509Certificate2 cert = null;
+            // Imported once, not per connection: per-connection imports made
+            // things worse, not better. Without one the server speaks plain
+            // HTTP, and Secure says so.
             if (pfx != null)
             {
                 try
                 {
-                    cert = new X509Certificate2(
+                    _cert = new X509Certificate2(
                         pfx, Certs.PfxPassword, X509KeyStorageFlags.Exportable);
                 }
                 catch (Exception e)
@@ -1548,7 +1962,7 @@ namespace DictationBridge
                               candidate + " instead");
                 }
                 Log.Write("listener bound to port " + candidate);
-                Accept(listener, bridge, cert);
+                Accept(listener, bridge);
                 return candidate;
             }
 
@@ -1662,7 +2076,34 @@ namespace DictationBridge
         private const int MaxConnections = 64;
         private static int _open;
 
-        private static void Accept(TcpListener listener, Bridge bridge, X509Certificate2 cert)
+        // The certificate a new connection is served with. It changes only when
+        // the PC moves to an address the old one does not list; a connection
+        // already open keeps the one it started with.
+        private static volatile X509Certificate2 _cert;
+
+        public static bool Secure
+        {
+            get { return _cert != null; }
+        }
+
+        // From the next connection on. True when it is not the certificate
+        // served until now, which means the phone has to install it. Takes cert
+        // either way. The old one is left to the connections still using it.
+        public static bool UseCertificate(X509Certificate2 cert)
+        {
+            X509Certificate2 old = _cert;
+            if (cert == null || old == null) return false;
+            if (cert.Thumbprint == old.Thumbprint)
+            {
+                cert.Dispose();
+                return false;
+            }
+            _cert = cert;
+            Log.Write("serving certificate " + cert.Thumbprint);
+            return true;
+        }
+
+        private static void Accept(TcpListener listener, Bridge bridge)
         {
             new Thread(() =>
             {
@@ -1690,6 +2131,7 @@ namespace DictationBridge
                         try { client.Close(); } catch (Exception) { }
                         continue;
                     }
+                    X509Certificate2 cert = _cert;
                     new Thread(() =>
                     {
                         try { Handle(client, bridge, cert); }
@@ -3188,6 +3630,18 @@ namespace DictationBridge
             // asks the person at the PC to do something now.
             string miss = bridge.RecentMiss;
             if (miss != null) return new PanelStatus(miss, miss, Skin.Warn, Skin.Warn, false);
+            // Then whatever the phone has to catch up with. Ahead of the phone's
+            // own state, which comes from polls made before the change and says
+            // nothing about whether the phone can carry on after it.
+            switch (bridge.PendingNotice)
+            {
+                case Notice.NewCertificate:
+                    return new PanelStatus("new certificate: install it on the phone",
+                        "new certificate, install it on the phone", Skin.Warn, Skin.Warn, false);
+                case Notice.NewAddress:
+                    return new PanelStatus("new address: scan the QR code again",
+                        "new address, scan the QR code again", Skin.Warn, Skin.Warn, false);
+            }
             switch (bridge.Phone)
             {
                 case PhoneState.Listening:
@@ -3235,7 +3689,8 @@ namespace DictationBridge
         public static readonly object KeepsFocus = new object();
 
         private readonly Bridge _bridge;
-        private readonly string _url;
+        // Changes when the PC moves to another address while running.
+        private string _url;
         private readonly ContextMenuStrip _panelMenu;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly System.Windows.Forms.Timer _pulse;
@@ -3253,11 +3708,15 @@ namespace DictationBridge
         private PaintText _phoneState;
         private PaintQuote _quote;
         private QrView _qr;
+        private PaintText _address;
+        private PaintText _caption;
 
         private Point _dragOrigin;
         private bool _dragging;
         private bool _expanded;
-        private bool _pairedAtStart;
+        // Expanded for the phone's sake: until a phone pairs, or catches up with
+        // a new address or certificate. Folded away once, when it has.
+        private bool _holdOpen;
         private int _refreshQueued;
         // Where the focus was before the menu took it, and whether the item that
         // was chosen wants to keep it.
@@ -3331,7 +3790,7 @@ namespace DictationBridge
             _timer = new System.Windows.Forms.Timer { Interval = 700 };
             _timer.Tick += (s, e) =>
             {
-                WatchPairing();
+                WatchPhone();
                 Refresh2();
             };
             _timer.Start();
@@ -3563,7 +4022,8 @@ namespace DictationBridge
                 Wrap = true,
                 BackColor = Skin.Field
             };
-            caption.Set("Scan with the iPhone camera to pair", Skin.InkSoft);
+            caption.Set(CaptionText(), Skin.InkSoft);
+            _caption = caption;
             var address = new PaintText
             {
                 TextFont = Skin.UiSmall,
@@ -3573,6 +4033,7 @@ namespace DictationBridge
                 BackColor = Skin.Field
             };
             address.Set(_url, Skin.Accent);
+            _address = address;
             // MouseClick, not Click, which a right-click raises as well.
             address.MouseClick += (s, e) =>
             {
@@ -3653,9 +4114,10 @@ namespace DictationBridge
             host.Controls.Add(_body);
             LayOutStrip();
             // Open on the QR code until a phone has paired: before that, the
-            // code is the only thing on the panel worth looking at.
-            _pairedAtStart = Pairing.Used;
-            SetExpanded(!_pairedAtStart);
+            // code is the only thing on the panel worth looking at. The same
+            // goes for a phone that has to catch up with a new certificate.
+            _holdOpen = PhoneNeedsCode();
+            SetExpanded(_holdOpen);
 
             // Anything that is not a button or the address moves the panel.
             foreach (Control c in new Control[] {
@@ -3897,18 +4359,36 @@ namespace DictationBridge
         public void ShowPairing()
         {
             _qr.SetAddress(Pairing.Link(_url));
-            _pairedAtStart = false;
+            _holdOpen = true;
             SetExpanded(true);
             Refresh2();
         }
 
-        // Collapses once, when the first phone pairs: the code has done its job,
-        // and the strip is what is worth watching from then on. Runs on the
-        // timer, so it is always on the UI thread.
-        private void WatchPairing()
+        // After the PC moved to another address while running: the page on the
+        // phone is still asking the old one, so show the code for the new one.
+        // A panel the user hid stays hidden; the tray icon says it as well.
+        public void ShowAddress(string url)
         {
-            if (_pairedAtStart || !Pairing.Used) return;
-            _pairedAtStart = true;
+            _url = url;
+            _qr.SetAddress(Pairing.Link(_url));
+            _address.Set(_url, Skin.Accent);
+            _holdOpen = true;
+            SetExpanded(true);
+            Refresh2();
+        }
+
+        private bool PhoneNeedsCode()
+        {
+            return !Pairing.Used || _bridge.PendingNotice != Notice.None;
+        }
+
+        // Collapses once, when the phone has paired or caught up: the code has
+        // done its job, and the strip is what is worth watching from then on.
+        // Runs on the timer, so it is always on the UI thread.
+        private void WatchPhone()
+        {
+            if (!_holdOpen || PhoneNeedsCode()) return;
+            _holdOpen = false;
             if (_expanded) SetExpanded(false);
         }
 
@@ -3941,7 +4421,17 @@ namespace DictationBridge
             PanelStatus now = PanelStatus.Of(_bridge);
             _lamp.Set(now.Dot, now.Breathe);
             _phoneState.Set(now.Strip, now.Ink);
+            _caption.Set(CaptionText(), Skin.InkSoft);
             _quote.SetText(_bridge.LastText);
+        }
+
+        // What to do with the code. Scanning a new one is no use until the phone
+        // trusts the new certificate, so then it says where that is first.
+        private string CaptionText()
+        {
+            return _bridge.PendingNotice == Notice.NewCertificate
+                ? "Right-click for the new certificate, then scan to pair"
+                : "Scan with the iPhone camera to pair";
         }
     }
 
@@ -3951,6 +4441,7 @@ namespace DictationBridge
         private readonly NotifyIcon _tray;
         private readonly MainForm _form;
         private readonly System.Windows.Forms.Timer _timer;
+        private readonly System.Windows.Forms.Timer _settle;
         // One icon per colour, made the first time it is needed and kept: the
         // state is checked every second, and it is nearly always the same.
         private readonly Dictionary<int, Icon> _icons = new Dictionary<int, Icon>();
@@ -3978,18 +4469,13 @@ namespace DictationBridge
             // it one click away and select the file, ready to attach.
             var logItem = new ToolStripMenuItem("Show the log file");
             logItem.Tag = DictationBridge.MainForm.KeepsFocus;
-            logItem.Click += (s, e) =>
-            {
-                try
-                {
-                    System.Diagnostics.Process.Start("explorer.exe",
-                        "/select,\"" + Store.File("dictation-bridge.log") + "\"");
-                }
-                catch (Exception ex)
-                {
-                    Log.Detail("could not open the log file", ex);
-                }
-            };
+            logItem.Click += (s, e) => ShowInExplorer("dictation-bridge.log");
+
+            // The file the phone has to install, which otherwise means finding
+            // the data folder. Not there on plain HTTP, which has no certificate.
+            var cerItem = new ToolStripMenuItem("Show the certificate file");
+            cerItem.Tag = DictationBridge.MainForm.KeepsFocus;
+            cerItem.Click += (s, e) => ShowInExplorer("dictation-bridge.cer");
 
             // One copy item. There used to be two, "Copy app address" and "Copy
             // page address", and they copied the same string. The address alone
@@ -4020,6 +4506,7 @@ namespace DictationBridge
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(copyItem);
             menu.Items.Add(resetItem);
+            if (Servers.Secure) menu.Items.Add(cerItem);
             menu.Items.Add(logItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(quitItem);
@@ -4062,6 +4549,67 @@ namespace DictationBridge
             _timer = new System.Windows.Forms.Timer { Interval = 1000 };
             _timer.Tick += (s, e) => Update();
             _timer.Start();
+
+            // Windows says when an address comes or goes, often several times
+            // over for one change, so let it settle before looking.
+            _settle = new System.Windows.Forms.Timer { Interval = 3000 };
+            _settle.Tick += (s, e) =>
+            {
+                _settle.Stop();
+                ThreadPool.QueueUserWorkItem(delegate { FollowAddress(); });
+            };
+            NetworkChange.NetworkAddressChanged += OnAddressChanged;
+        }
+
+        // Raised on a worker thread, and the timer belongs to this one.
+        private void OnAddressChanged(object sender, EventArgs e)
+        {
+            try
+            {
+                _form.BeginInvoke((MethodInvoker)delegate
+                {
+                    _settle.Stop();
+                    _settle.Start();
+                });
+            }
+            catch (InvalidOperationException)
+            {
+                // No window yet, or none any more.
+            }
+        }
+
+        // On a worker thread: a new address can mean making a certificate.
+        private void FollowAddress()
+        {
+            try
+            {
+                bool newCertificate;
+                if (Addresses.Follow(out newCertificate) == null) return;
+                _bridge.Notify(newCertificate ? Notice.NewCertificate : Notice.NewAddress);
+                string url = Addresses.Url;
+                _form.BeginInvoke((MethodInvoker)delegate { _form.ShowAddress(url); });
+            }
+            catch (InvalidOperationException)
+            {
+                // The panel went while this ran: the app is quitting.
+            }
+            catch (Exception e)
+            {
+                Log.Detail("WARN: could not follow the address change", e);
+            }
+        }
+
+        // Explorer with the file selected, ready to attach or send.
+        private static void ShowInExplorer(string name)
+        {
+            try
+            {
+                System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + Store.File(name) + "\"");
+            }
+            catch (Exception e)
+            {
+                Log.Detail("could not show " + name, e);
+            }
         }
 
         // Asks first: every phone that scanned the old code stops typing until
@@ -4164,6 +4712,8 @@ namespace DictationBridge
 
         protected override void ExitThreadCore()
         {
+            NetworkChange.NetworkAddressChanged -= OnAddressChanged;
+            _settle.Stop();
             _timer.Stop();
             _tray.Visible = false;
             _tray.Dispose();
@@ -4207,9 +4757,10 @@ namespace DictationBridge
         private static int Run(string[] args)
         {
             // One port serves the page, the status poll and dictation, so --port
-            // is the only knob. The old --ws port is no longer used.
+            // is the only port to choose. The old --ws port is no longer used.
             int httpPort = Servers.DefaultPort;
             bool portWasChosen = false;
+            string address = null;
             for (int i = 0; i < args.Length - 1; i++)
             {
                 if (args[i] == "--port" || args[i] == "--http")
@@ -4221,6 +4772,22 @@ namespace DictationBridge
                         portWasChosen = true;
                     }
                 }
+                // For when the address the app picks is not the one the phone can
+                // reach: a VPN, a second network card, or the PC's own hotspot.
+                if (args[i] == "--address")
+                {
+                    IPAddress parsed;
+                    if (IPAddress.TryParse(args[i + 1], out parsed) &&
+                        parsed.AddressFamily == AddressFamily.InterNetwork)
+                    {
+                        address = parsed.ToString();
+                    }
+                    else
+                    {
+                        Log.Write("WARN: --address " + args[i + 1] + " is not an IPv4 address " +
+                                  "such as 192.168.1.20, so the app picks one itself");
+                    }
+                }
             }
             Log.Write("port: " + httpPort + (portWasChosen ? " (chosen on the command line)" : " (default)"));
 
@@ -4230,15 +4797,16 @@ namespace DictationBridge
             Log.Say("");
 
             Log.Stage("picking a network address");
-            string ip = PrimaryAddress();
+            string ip = Addresses.Choose(address);
 
             Log.Stage("certificate");
             X509Certificate2 cert = null;
             byte[] pfx = null;
-            string caCerPath = null;
+            string caCerPath = Store.File("dictation-bridge.cer");
+            bool replaced = false;
             try
             {
-                cert = Certs.Ensure(ip, out caCerPath);
+                cert = Certs.Ensure(ip, out caCerPath, out replaced);
                 if (cert != null)
                 {
                     pfx = cert.Export(X509ContentType.Pfx, Certs.PfxPassword);
@@ -4252,9 +4820,6 @@ namespace DictationBridge
                 Log.Detail("WARN: could not create certificate, falling back to http", e);
             }
 
-            bool secure = pfx != null;
-            string scheme = secure ? "https" : "http";
-
             // Before the listener, so a pairing file that cannot be read or
             // written is reported at startup rather than on the first request.
             Log.Stage("pairing key");
@@ -4263,6 +4828,9 @@ namespace DictationBridge
                 : "pairing: no phone paired yet, scan the QR code on the panel");
 
             var bridge = new Bridge();
+            // The phone trusted the old certificate, and the panel is where the
+            // person will look.
+            if (replaced) bridge.Notify(Notice.NewCertificate);
             // One port for the page and the socket. iOS accepted TLS on the HTTP
             // port but rejected it on a second listener using the same
             // certificate, so both now share the port that already worked.
@@ -4277,7 +4845,13 @@ namespace DictationBridge
                           httpPort + ". Use the address below and rescan the QR code.");
             }
 
-            string url = scheme + "://" + ip + ":" + boundPort + "/";
+            // From the listener rather than from the certificate: one that could
+            // not be imported leaves the server on plain HTTP, and an https link
+            // to it would never load.
+            bool secure = Servers.Secure;
+            string scheme = secure ? "https" : "http";
+            Addresses.Serving(scheme, boundPort);
+            string url = Addresses.Url;
 
             Log.Write("listening: " + scheme + " on " + boundPort + " (page and socket share it)");
             Log.Write("open this on the phone: " + url);
@@ -4287,7 +4861,8 @@ namespace DictationBridge
             if (secure)
             {
                 Log.Say("  On the iPhone, once:");
-                Log.Say("   1. Send this file to the phone and tap it:");
+                Log.Say("   1. Send this file to the phone and tap it (right-click the panel,");
+                Log.Say("      Show the certificate file):");
                 Log.Say("");
                 Log.Say("        " + caCerPath);
                 Log.Say("");
@@ -4317,54 +4892,6 @@ namespace DictationBridge
             Log.Write("uptime at startup: " + (Environment.TickCount / 1000) + "s since boot");
             Application.Run(context);
             return 0;
-        }
-
-        // Virtual adapters (VMware, Hyper-V, WSL) and link-local addresses are
-        // not reachable from a phone, so rank real hardware first.
-        private static string PrimaryAddress()
-        {
-            List<string> best = new List<string>();
-            List<string> fallback = new List<string>();
-            try
-            {
-                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
-                {
-                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
-
-                    string desc = (ni.Name + " " + ni.Description).ToLowerInvariant();
-                    bool virtualAdapter = desc.Contains("vmware") || desc.Contains("virtualbox") ||
-                        desc.Contains("hyper-v") || desc.Contains("vethernet") ||
-                        desc.Contains("loopback") || desc.Contains("bluetooth") ||
-                        desc.Contains("tap-") || desc.Contains("wsl");
-
-                    foreach (UnicastIPAddressInformation ua in ni.GetIPProperties().UnicastAddresses)
-                    {
-                        if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-                        if (IPAddress.IsLoopback(ua.Address)) continue;
-                        // 169.254.x.x is link-local; not usable across networks.
-                        if (ua.Address.ToString().StartsWith("169.254.")) continue;
-
-                        if (virtualAdapter) fallback.Add(ua.Address.ToString());
-                        else best.Add(ua.Address.ToString());
-                    }
-                }
-            }
-            catch (Exception) { }
-
-            if (best.Count > 0)
-            {
-                Log.Write("lan addresses: " + string.Join(", ", best.ToArray()));
-                return best[0];
-            }
-            if (fallback.Count > 0)
-            {
-                Log.Write("WARN: only virtual adapter found: " + string.Join(", ", fallback.ToArray()));
-                return fallback[0];
-            }
-            Log.Write("WARN: no usable IPv4 address found, using loopback");
-            return "127.0.0.1";
         }
     }
 }

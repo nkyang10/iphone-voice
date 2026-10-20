@@ -469,13 +469,42 @@ the file has the key, and the certificate is self-signed.
   and the build fails if the result is not byte-identical to the upstream text. Never
   retype a licence — a transcription is not the licence, and it drifts.
 
-**The certificate is preserved between runs.** `Certs.Ensure` reuses the saved
-`.pfx` unless it is near expiry or stops covering the current address, so a
-restart never asks the phone to trust anything new. The SAN carries
-`dictation-bridge.local` as well as every current IP, so a phone reached by
-that name keeps working on any network. A CA-signed chain is not an option:
-`SslStream` refuses to serve one whose root is not in a local trust store,
-and installing that root is not this app's decision to make.
+**The certificate is preserved between runs, and every replacement is a reinstall
+on the phone.** `Certs.Ensure` reuses the saved `.pfx` when its SAN lists the
+address going into the QR code and it has more than 30 days left. Anything else
+makes a new one, so do not widen those conditions casually. `Covers` compares
+`IPAddress` values parsed from the SAN's DER by `ReadSan`. It used to search the
+text of `X509Extension.Format`, which differs between Windows versions and display
+languages, and it counted `dictation-bridge.local` as covering every address: every
+certificate listed that name, so none was ever replaced, and a PC that moved kept
+serving a certificate the phone could never accept. Nothing publishes that name, so
+new certificates leave it out. A new certificate lists `localhost`, `127.0.0.1`, the
+chosen address, the PC's other non-virtual addresses, then every address of the one
+it replaces, up to `MaxAddresses` (16), so a laptop that moves between networks
+settles on one certificate. Five years is deliberate: Apple's 825-day limit is not
+applied to a certificate the user installed and trusted as a root (trustd skips
+"user-anchored leafs"), and shortening it only adds reinstalls. `replaced` is what
+raises `Notice.NewCertificate`: a missing `.pfx` is a first run and raises nothing,
+an unreadable one counts as replaced. A CA-signed chain is not an option:
+`SslStream` refuses to serve one whose root is not in a local trust store, and
+installing that root is not this app's decision to make.
+
+**`Addresses` chooses the QR code's address and follows it.** `Pick` ranks by a
+default gateway, then not virtual (`VirtualWords` in the adapter name, or a tunnel),
+then a private RFC 1918 address, then a physical adapter type, then being listed in
+the saved certificate, and keeps Windows' order for a tie. The address already in
+the code wins for as long as the PC has it, so plugging in a cable does not strand a
+phone that works. `TrayContext` listens to `NetworkChange.NetworkAddressChanged`,
+waits three seconds for the network to settle, and runs `Addresses.Follow` on a
+worker thread, because it may make a certificate. A new one goes to
+`Servers.UseCertificate`, which serves it from the next connection on (open ones keep
+theirs) and says whether it differs from the one served before; that, not
+`replaced`, decides between `Notice.NewCertificate` and `Notice.NewAddress`. The
+panel then opens on the new code, and `PanelStatus` says which it is. A notice is
+cleared by the next status poll that passes the key check, since a page that gets
+one through has both. `--address` fixes the address, which is then never moved. The
+log's `addresses:` line lists every candidate with the reasons, which is how to
+explain a wrong pick.
 
 **Never let a stale page survive a rebuild.** iOS Safari re-serves a cached copy
 even with `no-store`, so a phone left open across a rebuild would keep running the

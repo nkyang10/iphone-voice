@@ -199,16 +199,16 @@ Leave it running. It needs to be running whenever you want to dictate.
 
 **2. Get the certificate off the PC and onto the phone.**
 
-The app just made you your own certificate. It is at:
+The app just made you your own certificate. Right-click the panel and choose
+Show the certificate file: Explorer opens with it selected. It is at:
 
     data\dictation-bridge.cer
 
-Get that one file to your phone however is easiest. AirDrop it, email it to
-yourself, put it in Drive, or copy it over USB. Tap it on the phone when it
-arrives.
+Get that one file to your phone however is easiest. Email it to yourself and tap
+it in the Mail app, or save it to iCloud Drive and tap it in the Files app.
 
 It has to be *your* file, not someone else's. The app makes a certificate
-covering your PC's current addresses, and the phone has to trust that one.
+covering your PC's addresses, and the phone has to trust that one.
 
 Then on the phone:
 
@@ -247,7 +247,9 @@ window you are working in, a word at a time as you say it, not after you finish.
 | Put the panel away | Right-click it, Hide the panel. Click the tray icon to get it back |
 | Click the panel while you talk | Fine: it never takes the focus from your window |
 | Move it | Drag it. It remembers where you left it |
+| Find the certificate | Right-click the panel, Show the certificate file |
 | Port already in use | Run `DictationBridge.exe --port 8099` |
+| QR code has the wrong address | Run `DictationBridge.exe --address 192.168.1.20`, with the address the phone can reach |
 
 There is no pause on the PC and no queue. One thing worth knowing: if you leave the page
 listening with the phone face up, it will pick up room noise and type it, so leave the
@@ -274,10 +276,21 @@ is a different place from step 2.
 by typing the address, or the pairing was reset since. Scan the QR code again. What you
 said meanwhile waits on the phone and is typed once it pairs.
 
-Your address changed and dictation stopped working: the certificate only covers the
-addresses the PC had when it was made. The app notices and issues a new one, and says
-so in `data\dictation-bridge.log`. Send the new `data\dictation-bridge.cer` to the phone
-and install it again.
+The panel says "new certificate: install it on the phone": the PC is on an address its
+old certificate does not list, so it made a new one. Right-click the panel, choose Show
+the certificate file, and install it on the phone as in steps 2 and 3. Then scan the QR
+code. Each new certificate keeps the old addresses, so going back to a network the PC
+has been on before does not ask again.
+
+The panel says "new address: scan the QR code again": the PC moved to another address
+the certificate already covers. Scan the code.
+
+The page says the PC has not answered for a while: check the app is running and the
+phone is on the same Wi-Fi as the PC, and look at the panel for one of the two messages
+above.
+
+The QR code has an address the phone cannot reach, on a PC with more than one network:
+start the app with that address, `DictationBridge.exe --address 192.168.1.20`.
 
 Nothing types: check the Start button on the phone page is greyed out, which means the
 microphone is open and the page is sending, and that it says *connected to desktop*.
@@ -310,8 +323,8 @@ report, and use Reset phone pairing... to cut off a phone you no longer trust.
 ## Limits
 
 The phone screen must stay on and unlocked. It cannot type into a program running as
-administrator. If your PC's address changes to one the certificate does not list, you
-need to send the certificate to the phone once more.
+administrator. If your PC's address changes to one the certificate does not list, the
+phone installs a new certificate once.
 
 ## Licence
 
