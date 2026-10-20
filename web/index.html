@@ -297,6 +297,22 @@ button {
   }
   setInterval(renderStats, 1000);
 
+  // Every browser on an iPhone is Safari's engine underneath, and the others expose
+  // webkitSpeechRecognition too, but only Safari may use it: in Chrome, Firefox, Edge,
+  // or the browser inside a chat app, start() fails with service-not-allowed, which
+  // this page used to report as a blocked microphone. The Camera app opens a QR code
+  // in the default browser, so this is an easy place to land. Told from the user
+  // agent, which is all there is; a home-screen icon runs as Safari.
+  var OTHER_BROWSER = (function () {
+    var ua = navigator.userAgent || '';
+    if (!/iPhone|iPad|iPod/.test(ua) || navigator.standalone === true) return false;
+    if (/CriOS|FxiOS|EdgiOS|OPiOS|OPT\/|GSA\/|FBAN|FBAV|Instagram|Line\/|MicroMessenger|DuckDuckGo/.test(ua)) return true;
+    return !/Version\/[\d.]+.*Safari\//.test(ua);
+  })();
+  var OTHER_BROWSER_TEXT = 'Only Safari can use speech recognition on an iPhone, and this looks like ' +
+    'another browser. Copy this page\'s address into Safari, or make Safari the default browser ' +
+    'and scan the QR code again.';
+
   if (!SR) {
     el.start.disabled = true;
     setRec('bad', 'unsupported');
@@ -309,8 +325,10 @@ button {
            'Install the certificate from the desktop, then reopen the page.');
     } else {
       warn('This browser has no SpeechRecognition. It needs Safari on iOS 14.5 or newer. ' +
-           'Chrome or Firefox on iOS cannot help: they do not expose the API.');
+           'Chrome, Firefox and the browsers inside other apps cannot use it on an iPhone.');
     }
+  } else if (OTHER_BROWSER) {
+    warn(OTHER_BROWSER_TEXT);
   }
 
   // ---- pairing --------------------------------------------------------------
@@ -1280,9 +1298,24 @@ button {
       if (code === 'not-allowed' || code === 'service-not-allowed') {
         wantRun = false;
         retireCurrent();
+        if (OTHER_BROWSER) {
+          setRec('bad', 'needs Safari');
+          warn(OTHER_BROWSER_TEXT);
+          return;
+        }
+        // Two different refusals. not-allowed is the microphone permission;
+        // service-not-allowed is iOS itself, whose recognizer only runs while
+        // Dictation or Siri is switched on, and the old microphone advice could
+        // not fix that.
+        if (code === 'service-not-allowed') {
+          setRec('bad', 'dictation is off');
+          warn('iOS did not allow speech recognition. Turn on Dictation in Settings > General > ' +
+               'Keyboard (or turn on Siri), then tap Start again.');
+          return;
+        }
         setRec('bad', 'mic blocked');
         warn('Microphone access is blocked for this site. Allow the microphone in ' +
-             'Settings, then tap Start again.');
+             'Settings > Safari > Microphone, then tap Start again.');
         return;
       }
 

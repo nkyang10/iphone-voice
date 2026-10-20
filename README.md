@@ -209,8 +209,9 @@ no longer trust.
 - The certificate lists the PC's addresses, not a name. On an address it doesn't list, such
   as another network, the phone installs a new certificate once. The new one keeps the old
   addresses, so moving between home and the office settles down after one install on each.
-- You need iOS 14.5 or newer. Chrome and Firefox on iOS work in theory, but Safari is
-  what this was tested with.
+- You need Safari on iOS 14.5 or newer. Chrome, Firefox and the browsers inside other apps
+  cannot do it: on an iPhone only Safari may use speech recognition, and the page says so
+  if it opens anywhere else.
 
 ## Setting up the phone
 
@@ -290,8 +291,17 @@ refusing to start. The panel, the QR code and the log all show the real one. Jus
 the QR code says, or rescan it.
 
 **The page says it has no speech recognition.**
-The certificate isn't trusted. Go back to step 4 above, and check you're opening `https://`
-and not `http://`.
+The certificate isn't trusted. Go back to step 4 of [Setting up the phone](#setting-up-the-phone),
+and check you're opening `https://` and not `http://`.
+
+**The page says only Safari can use speech recognition.**
+It opened in another browser: Chrome, Firefox, or the one inside a chat app. The Camera app
+opens a QR code in your default browser. Copy the page's address into Safari, or make Safari
+the default browser and scan the code again.
+
+**The page says iOS did not allow speech recognition.**
+iOS only runs speech recognition while Dictation or Siri is on. Turn on Dictation in
+Settings > General > Keyboard, then tap **Start listening**.
 
 **The page shows your words but nothing gets typed.**
 Check the Start button. If it is **greyed out** the microphone is open and the page is

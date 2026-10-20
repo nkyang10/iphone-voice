@@ -277,6 +277,14 @@ that went into the back-forward cache while listening came back with Start greye
 nothing running, and nothing would ever light it again. `pageshow` with `persisted` polls
 and checks the version straight away.
 
+**`service-not-allowed` is not a blocked microphone.** Every iPhone browser exposes
+`webkitSpeechRecognition`, but only Safari may use it: elsewhere `start()` fails with
+`service-not-allowed`, and in Safari the same code means Dictation and Siri are both off.
+`not-allowed` is the microphone permission. The page tells another browser from Safari by
+the user agent (`OTHER_BROWSER`) and warns as soon as it loads, since the Camera app opens
+a QR code in whatever the default browser is. It only warns: a user-agent guess must never
+disable Start, because a wrong guess would lock out a real Safari.
+
 **Never use `speechSynthesis` or a concurrent `getUserMedia` track.** On iOS the
 recognizer goes deaf while TTS plays, and a second audio track gets muted within a
 second or two. No read-back confirmations, no level meter.

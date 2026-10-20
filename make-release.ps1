@@ -272,6 +272,14 @@ which it settled on.
 "No speech recognition" on the page: the certificate is not trusted. Do step 3, which
 is a different place from step 2.
 
+The page says only Safari can use speech recognition: it opened in another browser,
+such as Chrome, because the Camera app opens a QR code in the default browser. Copy the
+page's address into Safari, which keeps the pairing, or make Safari the default browser
+and scan the code again.
+
+The page says iOS did not allow speech recognition: iOS only runs it while Dictation or
+Siri is on. Turn on Dictation in Settings > General > Keyboard, then tap Start listening.
+
 "Not paired with this PC" on the page: it was opened without the pairing key, usually
 by typing the address, or the pairing was reset since. Scan the QR code again. What you
 said meanwhile waits on the phone and is typed once it pairs.
