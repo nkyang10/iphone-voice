@@ -137,10 +137,11 @@ which it settled on. Cantonese is tried as `zh-HK` first, then `yue-HK`, then `z
 
 ### Auto-Lock
 
-Set Settings > Display & Brightness > Auto-Lock to **Never**.
+While the page is listening it keeps the phone's screen on (iOS 16.4 or newer), and lets it
+lock again when you tap Stop. If the screen still locks while you dictate, set Settings >
+Display & Brightness > Auto-Lock to **Never**.
 
-If the phone screen locks, the page is suspended and stops listening. This is the one
-setting worth changing.
+If the phone screen locks, the page is suspended and stops listening.
 
 ## What it looks like in use
 
@@ -257,6 +258,10 @@ runs out, which is one more install.
 While it runs, the app follows the PC's address. When the network changes, the panel
 opens on a new QR code and says *new address: scan the QR code again*, or asks for the
 new certificate first if it needed one.
+
+When you update or rebuild the app, a phone that still has the page open loads the new
+page by itself. If it is listening at that moment, it says so and waits for you to tap
+Stop, so nothing you are saying is cut off.
 
 ## When something goes wrong
 

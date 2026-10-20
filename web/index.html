@@ -23,6 +23,9 @@
   select {
     font: inherit; font-size: 15px; padding: 10px 12px; border-radius: 10px;
     background: #202124; color: #e8eaed; border: 1px solid #3c4043; flex: 1;
+    /* A flex item is never narrower than its content by default, and the longest
+       language name is wider than a phone: the box ran off the right edge. */
+    min-width: 0; text-overflow: ellipsis;
   }
   .val { font-size: 15px; font-variant-numeric: tabular-nums; color: #e8eaed; }
 button {
@@ -55,6 +58,7 @@ button {
     display: none; background: #17303f; border: 1px solid #1f5b7a;
     color: #8ab4f8; border-radius: 10px; padding: 11px 13px; font-size: 14px;
   }
+  .pendingbox.show { display: block; }
   #transcript {
     max-height: 30vh; overflow-y: auto; font-size: 15px; line-height: 1.5;
     -webkit-overflow-scrolling: touch;
@@ -83,24 +87,25 @@ button {
 
 <div class="row">
   <span class="dot" id="wsDot"></span>
-  <span class="label" id="wsLabel">connecting to desktop</span>
+  <span class="label" id="wsLabel" aria-live="polite">connecting to desktop</span>
 </div>
 <div class="row">
   <span class="dot" id="recDot"></span>
-  <span class="label" id="recLabel">idle</span>
+  <span class="label" id="recLabel" aria-live="polite">idle</span>
 </div>
 
-  <div class="row">
-  <span class="label">Language</span>
+<div class="row">
+  <label class="label" for="lang">Language</label>
   <select id="lang"></select>
 </div>
 
 <div class="warnbox" id="pairWarn" role="alert"></div>
 <div class="warnbox" id="typeWarn" role="alert"></div>
-<div class="warnbox" id="warn"></div>
-  <div class="pendingbox" id="pending">
-    <span id="pendingText"></span>
-  </div>
+<div class="warnbox" id="warn" role="alert"></div>
+<div class="pendingbox" id="pending" role="status">
+  <span id="pendingText"></span>
+</div>
+<div class="pendingbox" id="updateNote" role="status"></div>
 
 <button id="start">Start listening</button>
 <button id="stop" disabled>Stop</button>
@@ -132,7 +137,7 @@ button {
   <h2>Diagnostics</h2>
   <div class="row">
     <input type="checkbox" id="logWords">
-    <span class="label">include spoken words in the report (off = privacy)</span>
+    <label class="label" for="logWords">include spoken words in the report (off = privacy)</label>
   </div>
   <div class="row">
     <button id="diagSend">Send to desktop</button>
@@ -178,13 +183,16 @@ button {
     diagOut: document.getElementById('diagOut'),
     pending: document.getElementById('pending'),
     pendingText: document.getElementById('pendingText'),
+    updateNote: document.getElementById('updateNote'),
     typingState: document.getElementById('typingState'),
     stats: document.getElementById('stats')
   };
 
   var stats = { sessions: 0, stalls: 0, sent: 0, heard: 0, errors: 0, langTries: 0, deaf: 0, streamed: 0, rewrites: 0, rewritesHeld: 0, retries: 0, repeats: 0, timeouts: 0, missed: 0 };
   var wantRun = false;
-  var history = [];
+  // What the desktop answered for, newest last. Not called history, which would hide
+  // window.history from the whole script.
+  var typedLines = [];
   var rec = null, lastEvent = 0, watchdog = null, restartTimer = null;
 
   // Whether the current recognizer has ever confirmed with onstart. Silence after
@@ -258,6 +266,9 @@ button {
   function syncStartButton() {
     el.start.disabled = wantRun;
     el.stop.disabled = !wantRun;
+    // Every way out of a run passes through here, including the ones where the page
+    // gives up by itself, so this is where the screen is allowed to lock again.
+    if (!wantRun) releaseWake();
     if (reportedRun !== wantRun) {
       reportedRun = wantRun;
       pollLoop();
@@ -528,6 +539,7 @@ button {
         pushLocal(chunk.text, typed ? '' : String(reply.reason || 'not-typed'));
         updatePending();
         flushOutbox();
+        if (!outbox.length) reloadWhenIdle();
       })
       .catch(function (e) {
         // Leave it at the head. The next status poll retries from here, so nothing
@@ -823,13 +835,13 @@ button {
   // be said again. A mismatch between this and the desktop is worth reporting.
 
   function pushLocal(text, miss) {
-    history.push({ t: text, time: new Date(), miss: miss || '' });
-    if (history.length > 200) history.shift();
+    typedLines.push({ t: text, time: new Date(), miss: miss || '' });
+    if (typedLines.length > 200) typedLines.shift();
     renderHistory();
   }
 
   function renderHistory() {
-    var rows = history.slice(-40).reverse();
+    var rows = typedLines.slice(-40).reverse();
     el.transcript.textContent = '';
     for (var i = 0; i < rows.length; i++) {
       var line = document.createElement('div');
@@ -871,30 +883,117 @@ button {
     setInterval(checkVersion, 60000);
   }
 
-  // iOS Safari keeps a cached copy even with no-store, so a phone left open
-  // across a desktop rebuild would keep running the old script. Ask the
-  // desktop what it is serving and reload when it differs. At boot the answer
-  // is only recorded: this copy has just been fetched.
+  // ---- page version ---------------------------------------------------------
+  // iOS Safari keeps a cached copy of the page even with no-store, so a phone left
+  // open across a desktop rebuild would keep running the old script, and so would
+  // a tab Safari brings back from its cache days later. The desktop writes the
+  // version of the page it serves into PAGE_VERSION as it serves it, and /config
+  // names the version it serves now, so this copy can tell whether it is current
+  // at any time, including the moment it opens.
+  //
+  // It used to record the first version /config named and compare later answers
+  // with that. A stale copy opening after a rebuild recorded the new version as its
+  // own and never noticed. The record also lived in localStorage, which every tab
+  // shares, so one tab reloading silenced the check in all the others.
+  //
+  // Reloading stops the microphone and loses whatever is still waiting to be sent,
+  // so it never happens while the page is listening or has words queued. It waits
+  // for Stop and an empty queue, and says so meanwhile.
+  var PAGE_VERSION = '__PAGE_VERSION__';
+  // Unstamped when the file is opened some other way than from the desktop, as in
+  // development. Such a copy compares against the first version it is told about.
+  var STAMPED = PAGE_VERSION.indexOf('__') !== 0;
+  var firstSeen = '';
+  var newerPage = '';
+  var reloadStuck = false;
+  var RELOADED_KEY = 'db-reloaded-for';
+  var CARRY_KEY = 'db-carry';
+
   function checkVersion(atBoot) {
     return api('/config')
       .then(function (cfg) {
         if (!cfg || !cfg.version) return;
-        var known = null;
-        try { known = localStorage.getItem('page-version'); } catch (e) {}
-        if (atBoot === true || known === null) {
-          if (known !== cfg.version) {
-            try { localStorage.setItem('page-version', cfg.version); } catch (e) {}
-          }
-          if (atBoot === true) note('ui', 'page ' + cfg.version);
+        if (!STAMPED && !firstSeen) firstSeen = cfg.version;
+        var mine = STAMPED ? PAGE_VERSION : firstSeen;
+        if (atBoot === true) note('ui', 'page ' + (STAMPED ? mine : 'unstamped') +
+          ', desktop serves ' + cfg.version);
+        if (cfg.version === mine) {
+          // Back to this page's own version, as when an older build is started again.
+          if (newerPage) { newerPage = ''; showUpdate(''); }
           return;
         }
-        if (known !== cfg.version) {
-          note('ui', 'desktop rebuilt the page, reloading');
-          try { localStorage.setItem('page-version', cfg.version); } catch (e) {}
-          location.reload(true);
-        }
+        if (newerPage !== cfg.version) note('ui', 'desktop serves a newer page: ' + cfg.version);
+        newerPage = cfg.version;
+        reloadWhenIdle();
       })
       .catch(function () {});
+  }
+
+  // Called again by Stop and by the queue emptying, which are the two things a
+  // waiting reload waits for.
+  function reloadWhenIdle() {
+    if (!newerPage) return;
+    if (wantRun || outbox.length || flushing) {
+      showUpdate(wantRun
+        ? 'The PC has a newer version of this page. It loads when you tap Stop.'
+        : 'The PC has a newer version of this page. It loads once the words still waiting have been sent.');
+      return;
+    }
+    var tried = '';
+    try { tried = sessionStorage.getItem(RELOADED_KEY) || ''; } catch (e) {}
+    if (tried === newerPage) {
+      // Reloaded for this version already, and Safari still produced the old copy.
+      // Trying again would only loop.
+      if (!reloadStuck) note('ui', 'reload for page ' + newerPage + ' did not take; not trying again');
+      reloadStuck = true;
+      showUpdate('The PC has a newer version of this page, but Safari keeps opening this one. ' +
+        'Close this tab, then scan the QR code on the PC again.');
+      return;
+    }
+    try { sessionStorage.setItem(RELOADED_KEY, newerPage); } catch (e) {}
+    carryTranscript();
+    note('ui', 'reloading for page ' + newerPage);
+    // A new address rather than reload(): Safari has no copy of it to fall back on.
+    // The desktop ignores the query, and the copy that opens takes it out again.
+    location.replace(location.pathname + '?v=' + newerPage + location.hash);
+  }
+
+  function showUpdate(text) {
+    if (el.updateNote.textContent !== text) el.updateNote.textContent = text;
+    el.updateNote.className = text ? 'pendingbox show' : 'pendingbox';
+  }
+
+  // The transcript lives in memory, so a reload for a newer page would wipe the one
+  // record of what was not typed. It goes across in this tab's sessionStorage and
+  // is removed as soon as the next copy has read it.
+  function carryTranscript() {
+    try {
+      var keep = typedLines.slice(-40), rows = [];
+      for (var i = 0; i < keep.length; i++) {
+        rows.push({ t: keep[i].t, at: keep[i].time.getTime(), miss: keep[i].miss });
+      }
+      sessionStorage.setItem(CARRY_KEY, JSON.stringify(rows));
+    } catch (e) {}
+  }
+
+  function takeCarriedTranscript() {
+    var rows = [];
+    try {
+      rows = JSON.parse(sessionStorage.getItem(CARRY_KEY) || '[]');
+      sessionStorage.removeItem(CARRY_KEY);
+    } catch (e) { rows = []; }
+    for (var i = 0; i < rows.length; i++) {
+      if (!rows[i] || typeof rows[i].t !== 'string') continue;
+      typedLines.push({ t: rows[i].t, time: new Date(rows[i].at || 0), miss: String(rows[i].miss || '') });
+    }
+    if (typedLines.length) renderHistory();
+  }
+
+  // The reload leaves ?v= in the address. Out it goes, so a bookmark or a
+  // home-screen icon made later does not carry it.
+  function tidyAddress() {
+    if (!/[?&]v=/.test(location.search)) return;
+    try { window.history.replaceState(null, '', location.pathname + location.hash); } catch (e) {}
   }
 
   // ---- recognizer -----------------------------------------------------------
@@ -1022,6 +1121,9 @@ button {
       missed: stats.missed,
       lastMiss: lastMiss,
       page: PAGE_ID,
+      pageVersion: STAMPED ? PAGE_VERSION : 'unstamped',
+      newerPage: newerPage,
+      wake: wakeLock ? 'held' : navigator.wakeLock ? 'not held' : 'unsupported',
       streamed: stats.streamed,
       rewrites: stats.rewrites,
       rewritesHeld: stats.rewritesHeld,
@@ -1215,10 +1317,20 @@ button {
   // Safari ends the session after a stretch of silence. That is normal for an
   // idle recognizer, so simply re-arm; rearm() retires the old instance so the
   // abort's own onend cannot schedule yet another restart.
+  //
+  // Not while the page is hidden, though. iOS ends the session when Safari goes into
+  // the background or the screen locks, and a start() from a hidden page cannot open
+  // the microphone: it fails, or never starts, and the wedge watchdog would give up on
+  // dictation before the user is even back. The visibilitychange handler re-arms when
+  // the page can be heard again.
   function scheduleRestart() {
     clearTimeout(restartTimer);
     restartTimer = setTimeout(function () {
       if (!wantRun) return;
+      if (document.visibilityState === 'hidden') {
+        note('rearm', 'waiting until the page is visible again');
+        return;
+      }
       rearm('session-ended');
     }, RESTART_MS);
   }
@@ -1256,6 +1368,8 @@ button {
   watchdog = setInterval(function () {
     if (!wantRun || !rec) return;
     if (recStartedOk) return;
+    // A hidden page cannot start the microphone, so its silence proves nothing.
+    if (document.visibilityState === 'hidden') return;
     var quiet = Date.now() - lastEvent;
     if (quiet < (wedgeRestarts > 0 ? STALL_RETRY_MS : STALL_MS)) return;
     stats.stalls++;
@@ -1300,6 +1414,8 @@ button {
     // nothing to do with language, which is how a stuck recognizer ended up
     // reporting langTries instead of stalls.
     if (!recStartedOk) return;
+    // Nothing is heard while the page is hidden, whatever the language.
+    if (document.visibilityState === 'hidden') return;
     // Heard something in this run: silence is normal then, because nobody is
     // talking. Compared against the per-run counter, not the page-lifetime one --
     // once a single word had ever been heard, the page-wide count stayed above
@@ -1379,6 +1495,49 @@ button {
     }
   }
 
+  // ---- keeping the screen on -------------------------------------------------
+  // A locked screen suspends the page and ends dictation, so while the page is
+  // listening it asks iOS to keep the screen on (Safari 16.4 and newer), and lets go
+  // when it stops. iOS drops the lock whenever the page is hidden, and it is asked
+  // for again when the page comes back; some iOS versions refuse that second
+  // request outside a tap, and the next Start gets it back.
+  //
+  // Never a silent video or audio loop to the same end: playing media can hang
+  // SpeechRecognition for the rest of the session (WebKit bug 321436). Where this is
+  // missing or refused, Auto-Lock set to Never is still the answer.
+  var wakeLock = null, wakeAsked = false, wakeWanted = false;
+
+  function holdWake() {
+    wakeWanted = true;
+    if (wakeLock || wakeAsked) return;
+    if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') return;
+    if (document.visibilityState !== 'visible') return;
+    wakeAsked = true;
+    var asked;
+    try { asked = navigator.wakeLock.request('screen'); }
+    catch (e) { wakeAsked = false; note('wake', 'request threw: ' + e.message); return; }
+    asked.then(function (lock) {
+      wakeAsked = false;
+      if (!wakeWanted) { lock.release().catch(function () {}); return; }
+      wakeLock = lock;
+      note('wake', 'keeping the screen on');
+      lock.addEventListener('release', function () {
+        if (wakeLock === lock) wakeLock = null;
+        note('wake', 'screen lock released');
+      });
+    }, function (e) {
+      wakeAsked = false;
+      note('wake', 'refused: ' + (e && e.name ? e.name : String(e)));
+    });
+  }
+
+  function releaseWake() {
+    wakeWanted = false;
+    var lock = wakeLock;
+    wakeLock = null;
+    if (lock) { try { lock.release().catch(function () {}); } catch (e) {} }
+  }
+
   // Start doubles as the recognizer's state display and as the only thing on the
   // page that can supply a real gesture to start(), so it lights up again the moment
   // iOS stops the microphone. See syncStartButton().
@@ -1399,6 +1558,7 @@ button {
     recordAttempt({ at: at, via: how || '?', outcome: 'starting', gesture: inGesture() });
     wantRun = true;
     sessionStartedAt = Date.now();
+    holdWake();
     // Per run, not per page load: the deaf timer below compares against it, and a
     // counter left over from an earlier run would switch that check off for good
     // after the first word ever spoken.
@@ -1510,12 +1670,14 @@ button {
       if (Date.now() - _stopTapAt < 250) return;
       _stopTapAt = Date.now();
       stop();
+      reloadWhenIdle();
       return;
     }
     if (ev && ev.pointerType === 'mouse') return;
     _stopTapAt = Date.now();
     _startTapAt = 0;
     stop();
+    reloadWhenIdle();
   }
 
   el.start.addEventListener('pointerdown', startTapped);
@@ -1524,7 +1686,15 @@ button {
   el.stop.addEventListener('click', stopTapped);
 
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && wantRun && (!rec || Date.now() - lastEvent > STALL_MS)) {
+    if (document.visibilityState !== 'visible') {
+      note('ui', 'page hidden' + (wantRun ? ' while listening' : ''));
+      return;
+    }
+    note('ui', 'page visible');
+    if (!wantRun) return;
+    // iOS lets go of the screen lock whenever the page is hidden.
+    holdWake();
+    if (!rec || recEnded || Date.now() - lastEvent > STALL_MS) {
       // rearm(), not a bare abort(). Aborting without retiring leaves the old
       // instance free to deliver its onend, and that onend then sets recEnded on a
       // page whose recognizer is the *new* one -- which lights the Start button while
@@ -1534,20 +1704,39 @@ button {
       // recognizer by hand and leave lastEvent where it was -- by definition more
       // than STALL_MS ago, or it would not have come here -- so the watchdog took
       // the brand-new recognizer for a wedged one on its very next tick.
+      //
+      // recEnded covers a session iOS ended while the page was hidden: the restart
+      // waited for this moment, see scheduleRestart().
       rearm('page-visible');
+    } else {
+      // Time spent hidden says nothing about the recognizer, so it does not count as
+      // silence. Otherwise the deaf check could walk the language chain the moment
+      // the page came back, for words nobody had a chance to say.
+      lastEvent = Date.now();
     }
   });
 
-  window.addEventListener('pagehide', function () {
-    wantRun = false;
-    clearTimeout(settleTimer);
-    settleTimer = null;
-    // Last chance for the held-back characters. Best effort like the flush below: a
+  // Leaving the page: another address, a reload, or Safari's back-forward cache.
+  // A full stop, not only wantRun = false. A page frozen with half its state
+  // still saying "listening" came back from the cache with Start greyed and nothing
+  // running, and nothing would ever light it again.
+  window.addEventListener('pagehide', function (ev) {
+    note('ui', 'pagehide' + (ev && ev.persisted ? ' into the back-forward cache' : ''));
+    // stop() sends whatever is held back. Best effort, like the flush after it: a
     // fetch started here usually does not finish, and navigator.sendBeacon cannot
     // carry the pairing key, which travels in a header.
-    flushHeld();
+    stop();
     flushOutbox();
-    try { if (rec) rec.abort(); } catch (e) {}
+  });
+
+  // Back from the back-forward cache. The page was frozen, not reloaded, so the
+  // desktop has not heard from it and the version may have moved on meanwhile.
+  window.addEventListener('pageshow', function (ev) {
+    if (!ev || !ev.persisted) return;
+    note('ui', 'restored from the back-forward cache');
+    setLink('checking');
+    pollLoop();
+    checkVersion();
   });
 
   // Exposed for diagnostics and for the browser-side test harness. Harmless:
@@ -1555,8 +1744,11 @@ button {
   // endpoints the page already uses.
   window.dictationBridge = {
     versionCheck: checkVersion,
+    pageVersion: function () { return STAMPED ? PAGE_VERSION : ''; },
+    newerPage: function () { return newerPage; },
+    wake: function () { return !!wakeLock; },
     stats: function () { return stats; },
-    transcript: function () { return history.slice(); },
+    transcript: function () { return typedLines.slice(); },
     queued: function () { return outbox.map(function (c) { return c.text; }); },
     pageId: function () { return PAGE_ID; },
     link: function () { return link; },
@@ -1607,11 +1799,20 @@ button {
     }
   });
 
+  // A button that says what just happened, then goes back to saying what it does.
+  // These used to keep "Copied" or "Send failed" for good, so a second tap looked
+  // as if it had done nothing.
+  function flashLabel(button, text, label) {
+    button.textContent = text;
+    clearTimeout(button.flashTimer);
+    button.flashTimer = setTimeout(function () { button.textContent = label; }, 4000);
+  }
+
   el.diagCopy.addEventListener('click', function () {
     var text = reportText();
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () {
-        el.diagCopy.textContent = 'Copied';
+        flashLabel(el.diagCopy, 'Copied', 'Copy report');
       }).catch(function () { showDiag(text); });
     } else {
       showDiag(text);
@@ -1642,12 +1843,17 @@ button {
   }
 
   el.diagSend.addEventListener('click', function () {
+    if (el.diagSend.disabled) return;
     note('ui', 'manual report send');
+    el.diagSend.disabled = true;
+    el.diagSend.textContent = 'Sending...';
     api('/diag', sendableReport(), DIAG_TIMEOUT_MS).then(function () {
-      el.diagSend.textContent = 'Sent - see desktop log';
+      el.diagSend.disabled = false;
+      flashLabel(el.diagSend, 'Sent - see desktop log', 'Send to desktop');
     }).catch(function (e) {
-      el.diagSend.textContent = e.status === 401
-        ? 'Not sent: pair this phone first' : 'Send failed: ' + e.message;
+      el.diagSend.disabled = false;
+      flashLabel(el.diagSend, e.status === 401
+        ? 'Not sent: pair this phone first' : 'Send failed: ' + e.message, 'Send to desktop');
     });
   });
 
@@ -1694,6 +1900,8 @@ button {
   // already here, and the poll loop retries by itself.
   loadPairKey();
   noteEnvironment();
+  tidyAddress();
+  takeCarriedTranscript();
   if (!pairKey) setLink('unpaired');
   startPolling();
 

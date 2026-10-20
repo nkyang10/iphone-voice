@@ -2471,7 +2471,7 @@ namespace DictationBridge
                 if (request.Method != "GET") return NotAllowed("GET");
                 var page = new Reply();
                 page.Type = "text/html; charset=utf-8";
-                page.Body = Page();
+                page.Body = ServedPage();
                 // Nothing else gets to frame the page: it holds the pairing key.
                 page.Headers = "Content-Security-Policy: frame-ancestors 'none'\r\n" +
                                "X-Frame-Options: DENY\r\n";
@@ -2796,6 +2796,25 @@ namespace DictationBridge
                 _version = "unknown";
             }
             return _version;
+        }
+
+        // The page as it goes to the phone: the embedded copy with its own version
+        // written into it. A copy Safari kept from an older build can then tell it
+        // is stale the moment it opens, by comparing that with /config, instead of
+        // only noticing when the desktop changes while it is open. See checkVersion()
+        // in the page. The version is still the hash of the page as built, so it
+        // does not depend on itself.
+        private const string VersionMark = "__PAGE_VERSION__";
+        private static string _served;
+
+        public static string ServedPage()
+        {
+            if (_served != null) return _served;
+            string page = Page();
+            int at = page.IndexOf(VersionMark, StringComparison.Ordinal);
+            _served = at < 0 ? page
+                : page.Substring(0, at) + PageVersion() + page.Substring(at + VersionMark.Length);
+            return _served;
         }
 
         // The page is compiled into the executable, so this is one file to copy

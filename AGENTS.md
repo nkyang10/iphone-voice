@@ -259,7 +259,23 @@ after any idle period. This was a real bug; see `rearm()`.
 **Never add an `<audio>` or `<video>` element to the page.** WebKit bug 321436: once
 media playback has occurred in a session, `SpeechRecognition` can hang with no
 `onresult`, `onerror`, or `onend` — no way to detect it programmatically. There is
-deliberately no keep-awake audio trick for the same reason; use Auto-Lock to Never.
+deliberately no keep-awake video or audio trick for the same reason. The page holds a
+Screen Wake Lock while it is listening instead, released by `syncStartButton()` on every
+way out of a run, and Auto-Lock set to Never covers phones where that is missing or
+refused.
+
+**Nothing restarts the recognizer while the page is hidden.** iOS ends the session when
+Safari goes into the background or the screen locks, and a hidden page cannot open the
+microphone, so a restart then can only fail and feed the wedge watchdog, which would give
+up on dictation before the user is back. `scheduleRestart()` waits, the watchdog and the
+deaf check skip a hidden page, and the `visibilitychange` handler re-arms on the way back,
+including after a session that ended meanwhile (`recEnded`). Time spent hidden does not
+count as silence.
+
+**`pagehide` is a full `stop()`.** It used to clear `wantRun` and nothing else, so a page
+that went into the back-forward cache while listening came back with Start greyed and
+nothing running, and nothing would ever light it again. `pageshow` with `persisted` polls
+and checks the version straight away.
 
 **Never use `speechSynthesis` or a concurrent `getUserMedia` track.** On iOS the
 recognizer goes deaf while TTS plays, and a second audio track gets muted within a
@@ -423,6 +439,13 @@ answer `401 {"error":"not-paired"}`.
 
 `--ignore-certificate-errors` is required because the certificate is self-signed.
 
+The page's lifecycle only shows on a real iPhone, so after a change to it check three
+things there. Rebuild while the phone is listening: the page should say a newer version is
+waiting and load it when you tap Stop, transcript intact. Lock the screen while it is
+listening, then unlock: it should start listening again by itself, or light Start, never
+sit greyed with nothing running. And leave it listening past the Auto-Lock time: the
+screen should stay on.
+
 ## Security posture
 
 Treat this as a personal tool on a trusted LAN. The barrier is the **pairing key**: 96
@@ -508,9 +531,19 @@ explain a wrong pick.
 
 **Never let a stale page survive a rebuild.** iOS Safari re-serves a cached copy
 even with `no-store`, so a phone left open across a rebuild would keep running the
-old script. Send `no-store, no-cache, must-revalidate, max-age=0` plus `Pragma`
-and `Expires`, and have the page compare `/config`'s `version` against
-`localStorage` and reload itself when they differ.
+old script, and so would a tab Safari restores later. Send `no-store, no-cache,
+must-revalidate, max-age=0` plus `Pragma` and `Expires`. `Servers.ServedPage()`
+writes the page's own version into `PAGE_VERSION`, replacing the first
+`__PAGE_VERSION__` in the page, so that mark must appear exactly once; and the page
+compares it with `/config`'s `version` at boot and every minute. Do not go back to
+recording the first version `/config` names: a stale copy that opens after a rebuild
+records the new version as its own and never notices, and a record in
+`localStorage` is shared by every tab, so one tab's reload silences the rest. A
+newer page never interrupts a page that is listening or still has words queued: it
+says so and waits for Stop and an empty queue, then goes to `?v=<version>`, an
+address Safari has no copy of, and the copy that opens drops the query again.
+`sessionStorage` remembers which version it reloaded for, so a reload that brings
+back an old copy says so instead of looping, and it carries the transcript across.
 
 **`build.ps1` stops a running app before compiling.** Writing the exe fails with
 `CS0016` while a copy is running and the previous binary is left in place, so a
