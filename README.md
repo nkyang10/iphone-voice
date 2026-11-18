@@ -17,6 +17,9 @@ Languages: [English](README.md) · [繁體中文](README.zh-Hant.md) · [简体�
 
 ## Get started
 
+**Requirements:** Windows 10 or later, 64-bit; an iPhone or iPad with iOS 14.5 or
+newer, using Safari; and the phone and the PC on the same Wi-Fi network.
+
 **1. On the PC**
 
 Download `DictationBridge.exe` and run it. That's the whole installation — no installer,
@@ -30,25 +33,41 @@ own copy on that first run, so everyone gets one that matches their own machine.
 
 iOS only allows dictation on a secure page, so the PC serves the page over HTTPS with a
 certificate of its own, and the phone has to trust it before dictation will work.
-Right-click the panel and choose **Show the certificate file**, get
-`dictation-bridge.cer` to the phone, install it, and switch on trust for it. This happens
-**once**, and the steps are in [Setting up the phone](#setting-up-the-phone) below.
+This happens **once**.
 
-**3. Scan the QR code**
+**Get your certificate.** Run the app once, right-click the panel and choose **Show the
+certificate file**. Explorer opens on the `data\` folder with `dictation-bridge.cer`
+selected.
 
-Point the camera at the QR code on the panel and tap the link that appears. That opens
-the page **and pairs the phone with this PC**: the code carries a pairing key as well as
-the address, which looks like `https://192.168.1.162:17123/`.
+**Send it to the phone.** Email it to yourself and tap it in the Mail app, or save it to
+iCloud Drive and tap it in the Files app. It has to be your own file: the certificate
+covers the addresses of the PC that made it.
 
-The address is written beside the code too, but typing it opens the page without pairing
-it, and the page will say so. If your camera won't read the code, choose **Copy pairing
-link** on the panel and send that link to the phone instead.
+**Install it:**
 
-**4. Tap Start listening**
+1. **Settings > General > VPN & Device Management**
+2. Tap the Dictation Bridge profile
+3. Tap **Install**
+
+**Then give it permission.** This second step is the one people miss, and the app will
+appear broken without it:
+
+4. **Settings > General > About > Certificate Trust Settings**
+5. Switch on **Dictation Bridge**
+
+**Open the page.** Scan the QR code on the panel — point the camera at it and tap the
+link that appears. That opens the page **and pairs the phone with this PC**: the code
+carries a pairing key as well as the address, which looks like
+`https://192.168.1.162:17123/`, so scan it rather than typing the address. The address is
+written beside the code too, but typing it opens the page without pairing it, and the page
+will say so. If your camera won't read the code, choose **Copy pairing link** on the panel
+and send that link to the phone instead.
+
+**3. Tap Start listening**
 
 Allow the microphone if you're asked. From here on, the phone needs nothing from you.
 
-**5. Talk**
+**4. Talk**
 
 Start speaking. Your words appear on the PC as you say them, word by word, not after you
 finish a sentence.
@@ -63,11 +82,10 @@ window.** There is no pause, no queue and no key to press.
 That is the whole design now: **the Start button on the phone is the only on/off switch**,
 on either end. Tap it and the desktop types; tap it again and it stops.
 
-It used to be safer. There was a **Ctrl+Alt+D** key on the PC, and the panel started paused,
-so a restart could not dump words into whatever window happened to be open. That second
-switch is gone, so one honest warning: **if you leave the page listening with the phone face
-up, it will pick up room noise and type it.** Put the phone somewhere it cannot hear the
-room, or tap Stop when you are not using it.
+Put the phone somewhere it cannot hear the room, or tap Stop when you are not using it:
+**if you leave the page listening with the phone face up, it will pick up room noise and
+type it.** It used to be safer, with a **Ctrl+Alt+D** key on the PC, but that second
+switch is gone.
 
 ### Reading the Start button
 
@@ -164,7 +182,7 @@ has something to catch up with: a new address, or a new certificate to install.
 
 Everything lands in a `data\` folder next to the exe, created on first run. The exe itself
 is never modified. You can delete the whole folder to reset everything, including the
-certificate.
+certificate — but not while the app is running.
 
 Only one file matters to you: **`data\dictation-bridge.cer`**, the certificate to install
 on the phone. Right-click the panel and choose **Show the certificate file** to find it.
@@ -213,39 +231,10 @@ no longer trust.
   cannot do it: on an iPhone only Safari may use speech recognition, and the page says so
   if it opens anywhere else.
 
-## Setting up the phone
-
-iOS only allows voice dictation on a secure page, and its version of Safari has no
-"proceed anyway" button. So the desktop runs a small HTTPS server and you trust its
-certificate once.
-
-**Get your certificate.** Run the app once, right-click the panel and choose **Show the
-certificate file**. Explorer opens on the `data\` folder with `dictation-bridge.cer`
-selected.
-
-**Send it to the phone.** Email it to yourself and tap it in the Mail app, or save it to
-iCloud Drive and tap it in the Files app. It has to be your own file: the certificate
-covers the addresses of the PC that made it.
-
-**Install it:**
-
-1. **Settings > General > VPN & Device Management**
-2. Tap the Dictation Bridge profile
-3. Tap **Install**
-
-**Then give it permission.** This second step is the one people miss, and the app will
-appear broken without it:
-
-4. **Settings > General > About > Certificate Trust Settings**
-5. Switch on **Dictation Bridge**
-
-**Open the page.** Scan the QR code on the panel. The code carries the pairing key, so scan
-it rather than typing the address.
-
-### It keeps working
+## The certificate: renewals and moving networks
 
 The desktop keeps its certificate between runs, so rebooting your PC or restarting the
-app doesn't ask you to do this again.
+app doesn't ask you to install it again.
 
 What the phone checks is the address: the certificate lists the PC's addresses, and the
 page has to be opened on one of them. When the PC turns up on an address the certificate
@@ -260,9 +249,10 @@ While it runs, the app follows the PC's address. When the network changes, the p
 opens on a new QR code and says *new address: scan the QR code again*, or asks for the
 new certificate first if it needed one.
 
-When you update or rebuild the app, a phone that still has the page open loads the new
-page by itself. If it is listening at that moment, it says so and waits for you to tap
-Stop, so nothing you are saying is cut off.
+To update the app, replace the single exe and keep the `data\` folder beside it. The
+certificate and the phone pairing both survive the swap, and a phone that still has the
+page open loads the new page by itself. If it is listening at that moment, it says so
+and waits for you to tap Stop, so nothing you are saying is cut off.
 
 ## When something goes wrong
 
@@ -291,8 +281,8 @@ refusing to start. The panel, the QR code and the log all show the real one. Jus
 the QR code says, or rescan it.
 
 **The page says it has no speech recognition.**
-The certificate isn't trusted. Go back to step 4 of [Setting up the phone](#setting-up-the-phone),
-and check you're opening `https://` and not `http://`.
+The certificate isn't trusted. Go back to the trust step — point 4 in step 2 of
+[Get started](#get-started) — and check you're opening `https://` and not `http://`.
 
 **The page says only Safari can use speech recognition.**
 It opened in another browser: Chrome, Firefox, or the one inside a chat app. The Camera app
@@ -315,9 +305,9 @@ rebuild it.
 
 **A word came out wrong and the next one did too.**
 Expected, and unavoidable: text is typed as it is recognised, and typed text cannot be
-un-typed. iOS rewrites a misheard word roughly a second after you say it, by which point it
-is already on screen. The page stops sending the rewrite and carries on, so one wrong word
-does not turn into a wrong sentence.
+un-typed. iOS rewrites a misheard word about half a second after you say it, by which
+point it is already on screen. The page stops sending the rewrite and carries on, so one
+wrong word does not turn into a wrong sentence.
 
 **Nothing appears in the target program.**
 The phone page says why as soon as it happens: the window in front is running as
@@ -331,8 +321,8 @@ panel's status line says the same for a few seconds.
 **The panel says *new certificate: install it on the phone*.**
 The PC is on an address its old certificate doesn't list, so it made a new one, and the
 phone can't use the page until it trusts it. Right-click the panel, choose **Show the
-certificate file**, and install it as in [Setting up the phone](#setting-up-the-phone),
-trust switch included. Then scan the QR code. The old Dictation Bridge profile can be
+certificate file**, and install it as in step 2 of [Get started](#get-started), trust
+switch included. Then scan the QR code. The old Dictation Bridge profile can be
 removed in VPN & Device Management.
 
 **The panel says *new address: scan the QR code again*.**

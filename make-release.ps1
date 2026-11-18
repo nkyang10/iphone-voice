@@ -3,10 +3,14 @@
 #   .\make-release.ps1                 # compile, then assemble the folder
 #   .\make-release.ps1 -UseExistingExe # assemble from desktop\DictationBridge.exe
 #
-# Produces release\DictationBridge-1.0.0\ containing the exe, the page as
-# compiled into it, a quick-start guide, and the certificate to send to a
-# phone. The exe is the whole program: there is no installer and nothing to
-# register, so a user only has to double-click one file.
+# Produces release\DictationBridge-<version>\ containing four files: the exe,
+# README.txt, LICENSE and THIRD_PARTY_NOTICES.txt. The page travels compiled
+# into the exe, not as a file beside it. No certificate ships in the package:
+# each recipient's own certificate is minted beside the exe on their first
+# run, which is what the wipe below and the leak guard at the end of this
+# script are there to protect. The exe is the whole program: there is no
+# installer and nothing to register, so a user only has to extract the folder
+# and double-click one file.
 
 param(
     # Assembling the folder from the exe build.ps1 already produced, instead of
@@ -96,71 +100,96 @@ if (Test-Path $runDir) { Remove-Item $runDir -Recurse -Force }
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
 Copy-Item $exe $runDir
 
-$proc = Start-Process -FilePath (Join-Path $runDir 'DictationBridge.exe') `
-    -WorkingDirectory $runDir -PassThru -WindowStyle Hidden
+# try/finally, not straight-line code: a throw anywhere in the test used to
+# leave the scratch directory behind in %TEMP%, and it holds a freshly minted
+# .pfx -- the private key this smoke test exists to prove is created. The
+# finally stops the process too, so a failed check cannot leave the app
+# running either.
+$proc = $null
 $certReady = $false
-for ($i = 0; $i -lt 40; $i++) {
-    Start-Sleep -Milliseconds 250
-    $cer = Join-Path $runDir 'data\dictation-bridge.cer'
-    $pfx = Join-Path $runDir 'data\dictation-bridge.pfx'
-    if ((Test-Path $cer) -and (Test-Path $pfx)) {
-        if ((Get-Item $cer).Length -gt 100) { $certReady = $true; break }
+try {
+    $proc = Start-Process -FilePath (Join-Path $runDir 'DictationBridge.exe') `
+        -WorkingDirectory $runDir -PassThru -WindowStyle Hidden
+    # All three, not just the certificate: the app writes pairing-key.txt a
+    # moment after the cert files land, so a loop that stops at the first two
+    # races the third and fails a working app at random.
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 250
+        $cer = Join-Path $runDir 'data\dictation-bridge.cer'
+        $pfx = Join-Path $runDir 'data\dictation-bridge.pfx'
+        $key = Join-Path $runDir 'data\pairing-key.txt'
+        if ((Test-Path $cer) -and (Test-Path $pfx) -and (Test-Path $key)) {
+            if ((Get-Item $cer).Length -gt 100) { $certReady = $true; break }
+        }
     }
-}
-if (-not $proc.HasExited) { $proc | Stop-Process -Force }
-Start-Sleep -Milliseconds 400
 
-if (-not $certReady) { throw "the app did not create its own certificate on first run" }
+    if (-not $certReady) { throw "the app did not create its own certificate on first run" }
 
-# The certificate it just made must be the one it would serve. A first run that
-# writes a .cer which does not match its own .pfx would leave the phone trusting
-# nothing, with nothing on screen to explain why.
-$minted = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
-    (Join-Path $runDir 'data\dictation-bridge.cer')
-$served = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
-    (Join-Path $runDir 'data\dictation-bridge.pfx'), 'dictation-bridge'
-if ($minted.Thumbprint -ne $served.Thumbprint) {
-    throw "the certificate written for the user is not the one the app will serve"
+    # The certificate it just made must be the one it would serve. A first run that
+    # writes a .cer which does not match its own .pfx would leave the phone trusting
+    # nothing, with nothing on screen to explain why.
+    $minted = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
+        (Join-Path $runDir 'data\dictation-bridge.cer')
+    $served = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 `
+        (Join-Path $runDir 'data\dictation-bridge.pfx'), 'dictation-bridge'
+    if ($minted.Thumbprint -ne $served.Thumbprint) {
+        throw "the certificate written for the user is not the one the app will serve"
+    }
+
+    # First run is not a success until the pairing key exists too. The QR code
+    # carries it, so a build that mints a certificate but writes no
+    # pairing-key.txt would pair nothing and could not be used at all.
+    if (-not (Test-Path (Join-Path $runDir 'data\pairing-key.txt'))) {
+        throw "the app did not create its pairing key on first run"
+    }
+} finally {
+    if ($proc -and -not $proc.HasExited) { $proc | Stop-Process -Force }
+    Start-Sleep -Milliseconds 400
+    Remove-Item $runDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-Write-Host "first run created a usable certificate, verified to match"
+Write-Host "first run created a usable certificate, verified to match, and a pairing key"
 
 # Confirm the page really is inside the exe, so a release can never ship with
-# the wrong page compiled in.
+# the wrong page compiled in. Both paths get the full containment check: the
+# exe's bytes have to contain all of web\index.html exactly as it stands now.
+# The clean-compile path used to settle for a grep for 'Dictation Bridge', but
+# the C# fallback stub a resource-less exe serves says those words too, so an
+# exe with no page embedded passed it.
+#
+# Read the page as UTF-8 bytes, not with Get-Content. Under PowerShell 5.1 that
+# cmdlet decodes a BOM-less file with the console's ANSI code page, so any
+# non-ASCII character in the page comes out mangled and the comparison can never
+# match -- which is a false alarm about the one check that exists to catch a
+# stale exe. The exe's own bytes are decoded the same way, so both sides of the
+# comparison are decoded alike.
 $bytes = [System.IO.File]::ReadAllBytes($exe)
 $text = [System.Text.Encoding]::UTF8.GetString($bytes)
-if ($text -notmatch 'Dictation Bridge') {
-    throw "the page does not appear to be embedded in the exe"
+$pageText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($page))
+if (-not $text.Contains($pageText)) {
+    if ($UseExistingExe) {
+        # A stale desktop\DictationBridge.exe copied over a freshly edited
+        # web\index.html would otherwise assemble a folder whose exe serves an
+        # older page, and every check above would pass: the page is embedded,
+        # just not this one. This is the same reason AGENTS.md insists on
+        # verifying the embedded page really changed after a rebuild.
+        throw "the exe's embedded page is not web\index.html as it stands now; rebuild with .\build.ps1"
+    }
+    throw "the freshly compiled exe does not contain web\index.html as it stands now; the /resource embed did not take"
 }
-# -UseExistingExe makes this the check that matters most: it is what proves the exe
-# that got copied in is the one this page was compiled into, rather than whatever
-# happened to be on disk.
+# The containment check is what makes -UseExistingExe safe: it is what proves
+# the exe that got copied in is the one this page was compiled into, rather
+# than whatever happened to be on disk.
 if (-not (Select-String -Path $page -Pattern 'webkitSpeechRecognition' -Quiet)) {
     throw "the page has no speech recognition in it"
 }
-# Compare the exe against the page directly. Without this, a stale desktop\DictationBridge.exe
-# copied over a freshly edited web\index.html would assemble a folder whose exe serves
-# an older page, and every check above would pass: the page is embedded, just not this
-# one. This is the same reason AGENTS.md insists on verifying the embedded page really
-# changed after a rebuild.
-if ($UseExistingExe) {
-    # Read the page as UTF-8 bytes, not with Get-Content. Under PowerShell 5.1 that
-    # cmdlet decodes a BOM-less file with the console's ANSI code page, so any
-    # non-ASCII character in the page comes out mangled and the comparison can never
-    # match -- which is a false alarm about the one check that exists to catch a stale
-    # exe. The exe's own bytes are decoded as UTF-8 a few lines up, so both sides of
-    # the comparison have to be decoded the same way.
-    $pageText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($page))
-    if (-not $text.Contains($pageText)) {
-        throw "the exe's embedded page is not web\index.html as it stands now; rebuild with .\build.ps1"
-    }
-    Write-Host "verified the exe's embedded page is the current web\index.html"
-}
-Write-Host "verified the page is embedded"
+Write-Host "verified the page embedded in the exe is the current web\index.html"
 
-# The QR encoder has to be in there too. Its presence in the binary is not proof
-# that it produces a readable code, so this also renders the address and decodes
-# the result with an independent decoder. This is the check that would have
-# caught the hand-written encoder: it looked right and would not scan.
+# The QR encoder has to be in there too. All this proves is presence in the
+# binary: it renders nothing and decodes nothing, so it is not proof that the
+# code the panel shows will scan. The independent decode is a documented manual
+# step instead -- the OpenCV procedure in CONTRIBUTING.md -- and that is the
+# check that would have caught the hand-written encoder: it looked right and
+# would not scan.
 if ($text -notmatch 'QRCoder') {
     throw "the QR encoder does not appear to be compiled into the exe"
 }
@@ -175,14 +204,12 @@ if ($leaked.Count -gt 0) {
     throw "the release must not contain keys or certificates: $($leaked.Name -join ', ')"
 }
 
-Remove-Item $runDir -Recurse -Force -ErrorAction SilentlyContinue
-
 # The quick-start guide goes in beside the exe. The README is written as plain
 # text so it opens by double-click with nothing installed. The screenshots are
 # deliberately left out: they are served from the repository, and a folder
 # someone unzips on a phone-carrying desk does not need them.
 $readme = @'
-# Dictation Bridge
+# Dictation Bridge __DB_VERSION__
 
 **Talk on your iPhone. The words appear in whatever window your Windows PC has focused.**
 
@@ -190,14 +217,21 @@ No typing, no leaning over the keyboard, no stopping what you're doing.
 
 ## Setup
 
-**1. Run `DictationBridge.exe`.**
+**1. Unzip it first.**
+
+Right-click the zip and choose Extract All, then run `DictationBridge.exe` from the
+extracted folder. Running it straight from the zip preview makes Windows extract to a
+temporary folder, and the certificate and pairing the app creates beside it are lost on
+cleanup.
+
+**2. Run `DictationBridge.exe`.**
 
 That's the whole installation. No installer, no runtime, no setup wizard. A small
 panel appears near the middle of your screen.
 
 Leave it running. It needs to be running whenever you want to dictate.
 
-**2. Get the certificate off the PC and onto the phone.**
+**3. Get the certificate off the PC and onto the phone.**
 
 The app just made you your own certificate. Right-click the panel and choose
 Show the certificate file: Explorer opens with it selected. It is at:
@@ -216,20 +250,20 @@ Then on the phone:
 2. Tap the Dictation Bridge profile
 3. Tap Install
 
-**3. Give it permission.** Most people stop here and think the app is broken. There
+**4. Give it permission.** Most people stop here and think the app is broken. There
 is one more step:
 
 4. Settings > General > About > Certificate Trust Settings
 5. Switch on Dictation Bridge
 
-**4. Open the page.** The panel shows a QR code. Point the phone's camera at it and
+**5. Open the page.** The panel shows a QR code. Point the phone's camera at it and
 tap the notification that appears. That opens the page and pairs the phone with this
 PC: the code carries a pairing key as well as the address. The address is written
 beside the code, `https://192.168.1.162:17123/`, but typing it opens the page without
 pairing it. If your camera will not read the code, use Copy pairing link on the panel
 and send the link to the phone.
 
-**5. Tap Start listening**, and allow the microphone.
+**6. Tap Start listening**, and allow the microphone.
 
 ## Use
 
@@ -251,6 +285,11 @@ window you are working in, a word at a time as you say it, not after you finish.
 | Port already in use | Run `DictationBridge.exe --port 8099` |
 | QR code has the wrong address | Run `DictationBridge.exe --address 192.168.1.20`, with the address the phone can reach |
 
+To start the app with an option: hold the Windows key and press R, type the exe's full
+path in quotes followed by the option, and press Enter -- for example
+"C:\Where You Put It\DictationBridge.exe" --port 8099. Or right-click the exe, make a
+shortcut, and add the option to the end of the Target field.
+
 There is no pause on the PC and no queue. One thing worth knowing: if you leave the page
 listening with the phone face up, it will pick up room noise and type it, so leave the
 phone somewhere it cannot hear the room, or tap Stop when you are not using it.
@@ -264,9 +303,10 @@ A locked screen stops dictation. While the page is listening it keeps the phone'
 on (iOS 16.4 or newer), and lets it lock again when you tap Stop. If the screen still
 locks while you dictate, set Settings > Display & Brightness > Auto-Lock to Never.
 
-When you update the app, a phone that has the page open loads the new page by itself. If
-it is listening at that moment, it says so and waits for you to tap Stop, so nothing you
-are saying is cut off.
+To update: replace the one exe and keep the `data\` folder beside it. Your certificate
+and phone pairing survive, and a phone that still has the page open picks up the new
+page by itself. If it is listening at that moment, it says so and waits for you to tap
+Stop, so nothing you are saying is cut off.
 
 Cantonese or Chinese: pick it from the dropdown on the phone page. Cantonese is the
 default. If your iPhone rejects a language the page tries the next one and tells you
@@ -274,8 +314,35 @@ which it settled on.
 
 ## If something goes wrong
 
-"No speech recognition" on the page: the certificate is not trusted. Do step 3, which
-is a different place from step 2.
+**The app just disappeared / never appeared.** The app writes everything it does to
+data\dictation-bridge.log -- send that file with any problem report. If
+data\last-run.txt still says state: running, it was killed or crashed; data\crash.txt
+exists only when something went wrong inside the app -- send that too. If a red box
+appeared instead, it names the problem; if it is about a port, start again with --port
+and a different number.
+
+**Windows protected your PC.** Windows shows this for any unsigned exe that came from
+the internet. Click More info, then Run anyway. The app is a single unsigned file by
+design; it has no installer.
+
+**The panel says the certificate failed.** The app could not create its certificate --
+the folder it runs from is probably read-only or protected (a corporate or system
+location). Move the whole app folder somewhere normal, like your Desktop, and start it
+again. Until then the phone page cannot use speech recognition.
+
+"SpeechRecognition needs a secure (https) page" on the page: it was opened over plain
+http, so Safari hides the recognizer. Open the https:// address written beside the QR
+code instead. If the certificate is not on the phone yet, do steps 3 and 4 first; if
+the panel says the certificate failed, see above -- there is no certificate to
+install yet.
+
+"This page is not a secure context" on the page: the certificate is not trusted yet.
+Do step 4, which is a different place from step 3, then open the page again. Most
+people stop after step 3 and think they are done.
+
+"This browser has no SpeechRecognition" on the page: the iPhone is on iOS older than
+14.5, or the page opened in a browser that cannot use speech recognition on an iPhone.
+Update iOS, or open the page's address in Safari, and try again.
 
 The page says only Safari can use speech recognition: it opened in another browser,
 such as Chrome, because the Camera app opens a QR code in the default browser. Copy the
@@ -291,7 +358,7 @@ said meanwhile waits on the phone and is typed once it pairs.
 
 The panel says "new certificate: install it on the phone": the PC is on an address its
 old certificate does not list, so it made a new one. Right-click the panel, choose Show
-the certificate file, and install it on the phone as in steps 2 and 3. Then scan the QR
+the certificate file, and install it on the phone as in steps 3 and 4. Then scan the QR
 code. Each new certificate keeps the old addresses, so going back to a network the PC
 has been on before does not ask again.
 
@@ -348,6 +415,12 @@ MIT. See LICENSE. The exe includes QRCoder, also MIT; see THIRD_PARTY_NOTICES.tx
 Not affiliated with Apple or Microsoft. Dictation on iOS is Apple's own feature; this
 just forwards the resulting text to your PC.
 '@
+# The heading names the build a recipient is actually holding, so a report can
+# say which version it came from. The here-string is single-quoted because its
+# text carries backticks and quotes of its own, so $version -- the same value
+# that chose the folder above -- is stamped in through a marker rather than by
+# interpolation.
+$readme = $readme.Replace('__DB_VERSION__', $version)
 Set-Content -Path (Join-Path $outDir 'README.txt') -Value $readme -Encoding UTF8
 
 foreach ($f in $licences) {

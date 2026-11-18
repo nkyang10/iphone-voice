@@ -648,6 +648,7 @@ namespace DictationBridge
         private static readonly object Gate = new object();
         private static string _current = "127.0.0.1";
         private static bool _fixed;
+        private static bool _unreachable;
         private static string _scheme = "https";
         private static int _port;
 
@@ -661,6 +662,15 @@ namespace DictationBridge
         public static string Url
         {
             get { lock (Gate) { return _scheme + "://" + _current + ":" + _port + "/"; } }
+        }
+
+        // Whether the address in the QR code is one a phone has no way to
+        // reach: no address at all, only a virtual adapter's, or an --address
+        // that is not one of this PC's. Set where the log's WARN lines are,
+        // so the panel and the log cannot disagree about it.
+        public static bool Unreachable
+        {
+            get { lock (Gate) { return _unreachable; } }
         }
 
         public static void Serving(string scheme, int port)
@@ -680,6 +690,9 @@ namespace DictationBridge
             Candidate best = Pick(all, null, Certs.SavedAddresses());
             Log.Write("addresses: " + Describe(all));
             string ip;
+            // The same three cases the WARN lines below are for, recorded as
+            // well as said, so the panel can show them too.
+            bool unreachable;
             if (requested != null)
             {
                 bool mine = false;
@@ -688,12 +701,14 @@ namespace DictationBridge
                     if (c.Address.ToString() == requested) mine = true;
                 }
                 ip = requested;
+                unreachable = !mine;
                 Log.Write("address: " + ip + ", chosen with --address" + (mine ? "" :
                     ". It is not one of this PC's, so the phone has to reach it some other way"));
             }
             else if (best != null)
             {
                 ip = best.Address.ToString();
+                unreachable = best.Virtual;
                 Log.Write("address: " + ip);
                 if (best.Virtual)
                 {
@@ -704,6 +719,7 @@ namespace DictationBridge
             else
             {
                 ip = "127.0.0.1";
+                unreachable = true;
                 Log.Write("WARN: no usable IPv4 address, so the QR code says 127.0.0.1, which a " +
                           "phone cannot reach. It moves as soon as the network is up");
             }
@@ -711,6 +727,7 @@ namespace DictationBridge
             {
                 _current = ip;
                 _fixed = requested != null;
+                _unreachable = unreachable;
             }
             return ip;
         }
@@ -751,6 +768,9 @@ namespace DictationBridge
                     newCertificate = Servers.UseCertificate(cert);
                 }
                 _current = ip;
+                // Kept in step with the address the code now carries: the same
+                // judgement the startup choice made.
+                _unreachable = next.Virtual;
                 return ip;
             }
         }
@@ -1002,8 +1022,12 @@ namespace DictationBridge
             }
             lines.Add("uptime: " + (Environment.TickCount / 1000) + "s");
             lines.Add("os: " + Safe(WinVersion));
-            lines.Add("app: " + Escape(Environment.Version.ToString()));
-            lines.Add("data: " + Escape(Store.Dir));
+            // Raw here, like the rest of the list: the copy into the log below
+            // escapes each line once, and crash.txt keeps raw UTF-8 on
+            // purpose, so a non-ASCII data path stays readable in the file
+            // people are told to open in Notepad.
+            lines.Add("app: " + Environment.Version);
+            lines.Add("data: " + Store.Dir);
             lines.Add("");
             lines.AddRange(Chain(e));
 
@@ -1601,6 +1625,14 @@ namespace DictationBridge
             }
         }
 
+        // The cumulative count of chunks nothing was typed for. The strip
+        // carries only the newest reason, and for eight seconds; the tray
+        // tooltip carries the total, which does not time out.
+        public int Missed
+        {
+            get { lock (_gate) { return _missedCount; } }
+        }
+
         public static string MissText(TypeResult result)
         {
             switch (result)
@@ -1608,7 +1640,7 @@ namespace DictationBridge
                 case TypeResult.OwnWindow: return "not typed: this panel had focus";
                 case TypeResult.NoWindow: return "not typed: no window in focus";
                 case TypeResult.Blocked: return "not typed: window runs as admin";
-                case TypeResult.Partial: return "partly typed: Windows refused";
+                case TypeResult.Partial: return "partly typed: the window may run as admin";
                 default: return null;
             }
         }
@@ -1697,6 +1729,9 @@ namespace DictationBridge
             public long Seq;
             // Null until typing finishes.
             public TypeResult? Result;
+            // When this page last sent a chunk, so a full table evicts the
+            // one that has been quiet longest rather than all of them.
+            public int Tick;
         }
 
         private readonly Dictionary<string, Seen> _seen = new Dictionary<string, Seen>();
@@ -1730,10 +1765,29 @@ namespace DictationBridge
                         return seq == last.Seq && last.Result.HasValue
                             ? last.Result.Value : TypeResult.Typed;
                     }
-                    if (last == null && _seen.Count >= MaxPages) _seen.Clear();
+                    if (last == null && _seen.Count >= MaxPages)
+                    {
+                        // Evict the page that has been quiet longest, not all
+                        // of them: clearing the table took the "typed at most
+                        // once" promise away from every still-open page at
+                        // once. No allocation, and 32 entries is the whole
+                        // table.
+                        string stillest = null;
+                        int stillestTick = 0;
+                        foreach (KeyValuePair<string, Seen> pair in _seen)
+                        {
+                            if (stillest == null ||
+                                unchecked(pair.Value.Tick - stillestTick) < 0)
+                            {
+                                stillest = pair.Key;
+                                stillestTick = pair.Value.Tick;
+                            }
+                        }
+                        if (stillest != null) _seen.Remove(stillest);
+                    }
                     // Marked before typing, not after: a chunk that fails partway
                     // is better lost than typed again over the part that made it.
-                    seen = new Seen { Seq = seq };
+                    seen = new Seen { Seq = seq, Tick = Environment.TickCount };
                     _seen[page] = seen;
                 }
                 _received++;
@@ -1956,14 +2010,18 @@ namespace DictationBridge
                 {
                     Log.Write("... and " + (rejected - 8) + " more unusable port(s)");
                 }
+                // The port the socket actually bound, not the one asked for:
+                // --port 0 means "pick one", and the QR code and the pairing
+                // link have to carry the port a phone can reach.
+                int bound = ((IPEndPoint)listener.LocalEndpoint).Port;
                 if (candidate != port)
                 {
                     Log.Write("port " + port + " was unusable, so the app moved to " +
-                              candidate + " instead");
+                              bound + " instead");
                 }
-                Log.Write("listener bound to port " + candidate);
+                Log.Write("listener bound to port " + bound);
                 Accept(listener, bridge);
-                return candidate;
+                return bound;
             }
 
             if (rejected > 8)
@@ -1981,6 +2039,11 @@ namespace DictationBridge
                     Log.Write("FATAL: Hyper-V, WSL2 and Docker Desktop reserve large blocks.");
                     Log.Write("FATAL: The reserved ranges on this machine:");
                     foreach (string line in ReservedRanges()) Log.Write("FATAL:   " + line);
+                    // The log has the detail; the box is the only thing on
+                    // screen, so it has to carry the remedy itself.
+                    PortFailureText = "Port " + port + " is reserved by Windows " +
+                        "(Hyper-V, WSL2 or Docker often reserve blocks). Start the " +
+                        "app with  --port <number>  using a different port.";
                 }
                 else
                 {
@@ -2086,12 +2149,23 @@ namespace DictationBridge
             get { return _cert != null; }
         }
 
+        // The wording for the on-screen message box when the bind failure was
+        // Windows refusing a reserved port, composed where the port and the
+        // socket error both are and read by the startup catch, which is what
+        // shows a box. Null for any other failure, so the box keeps its
+        // general wording.
+        public static string PortFailureText;
+
         // From the next connection on. True when it is not the certificate
         // served until now, which means the phone has to install it. Takes cert
         // either way. The old one is left to the connections still using it.
         public static bool UseCertificate(X509Certificate2 cert)
         {
             X509Certificate2 old = _cert;
+            // old == null is expected-unused today: the only caller runs
+            // behind Servers.Secure, where a certificate exists. Kept as a
+            // guard rather than deleted, so a future caller cannot silently
+            // swap one into a server that is serving plain HTTP.
             if (cert == null || old == null) return false;
             if (cert.Thumbprint == old.Thumbprint)
             {
@@ -2762,7 +2836,6 @@ namespace DictationBridge
                 case 429: return "Too Many Requests";
                 case 431: return "Request Header Fields Too Large";
                 case 500: return "Internal Server Error";
-                case 503: return "Service Unavailable";
                 default: return "Error";
             }
         }
@@ -3643,12 +3716,54 @@ namespace DictationBridge
             Breathe = breathe;
         }
 
+        // The one decider: everything the strip, the lamp, the tray icon and
+        // its tooltip say comes from here. Core below is the state itself --
+        // Of's own other half, called from nowhere else and not a second
+        // opinion -- and this wrapper adds the one thing that outlives the
+        // state: how many chunks nothing was typed for.
         public static PanelStatus Of(Bridge bridge)
+        {
+            PanelStatus status = Core(bridge);
+            int missed = bridge.Missed;
+            if (missed > 0)
+            {
+                // The strip's reason for the newest miss is there for eight
+                // seconds; the count in the tooltip is the part that lasts.
+                status = new PanelStatus(status.Strip,
+                    status.Tip + " \u00B7 " + missed +
+                    (missed == 1 ? " chunk not typed" : " chunks not typed"),
+                    status.Ink, status.Dot, status.Breathe);
+            }
+            return status;
+        }
+
+        private static PanelStatus Core(Bridge bridge)
         {
             // Words that did not land come first: it is the one thing here that
             // asks the person at the PC to do something now.
             string miss = bridge.RecentMiss;
             if (miss != null) return new PanelStatus(miss, miss, Skin.Warn, Skin.Warn, false);
+            // Nothing works on plain HTTP: the page cannot listen on an
+            // insecure origin at all. Direct rather than a Notice on purpose,
+            // because a poll clears a Notice, and on plain HTTP no phone gets
+            // that far. Ahead of everything about the phone.
+            if (!Servers.Secure)
+            {
+                return new PanelStatus("not secure: the certificate failed, see the log",
+                    "not secure: certificate failed, see the log",
+                    Skin.Warn, Skin.Warn, false);
+            }
+            // An address a phone has no way to reach: scanning cannot work, so
+            // this is ahead of the states that tell someone to scan, the
+            // first-run text included. The notices underneath are cleared
+            // only by a poll, and no poll can get through, so they come back
+            // into view once the address does.
+            if (Addresses.Unreachable)
+            {
+                return new PanelStatus("no reachable address: check Wi-Fi / --address",
+                    "no reachable address (Wi-Fi or --address)",
+                    Skin.Warn, Skin.Warn, false);
+            }
             // Then whatever the phone has to catch up with. Ahead of the phone's
             // own state, which comes from polls made before the change and says
             // nothing about whether the phone can carry on after it.
@@ -4322,8 +4437,20 @@ namespace DictationBridge
 
         public event Action QuitRequested;
 
+        // The footer button only, and it asks first, the way the reset prompt
+        // does: it sits beside the copy button, and a stray click in the middle
+        // of a dictation must not end it while the phone keeps listening. The
+        // menu's Quit item stays instant, as a tray menu's is. Asking happens
+        // before QuitRequested is raised, so Cancel changes nothing.
         private void Quit()
         {
+            DialogResult answer = MessageBox.Show(this,
+                "Quit Dictation Bridge?\n\n" +
+                "The phone's page keeps listening, but its words are not typed " +
+                "here once the app has quit.",
+                "Quit Dictation Bridge", MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.OK) return;
             if (QuitRequested != null) QuitRequested();
         }
 
@@ -4445,12 +4572,20 @@ namespace DictationBridge
         }
 
         // What to do with the code. Scanning a new one is no use until the phone
-        // trusts the new certificate, so then it says where that is first.
+        // trusts the new certificate, so then it says where that is first. On a
+        // first run that step is the whole journey: iOS refuses the certificate
+        // with no way past it, and every way through it lives in the right-click
+        // menu, so until one phone has paired the caption says where the menu
+        // is. Short on purpose: the card beside the code fits three wrapped
+        // lines, and the "then scan to pair" wording overflows a fourth.
         private string CaptionText()
         {
-            return _bridge.PendingNotice == Notice.NewCertificate
-                ? "Right-click for the new certificate, then scan to pair"
-                : "Scan with the iPhone camera to pair";
+            if (_bridge.PendingNotice == Notice.NewCertificate)
+                return "Right-click for the new certificate, then scan to pair";
+            if (!Pairing.Used && Servers.Secure)
+                return "First time: right-click > Show the certificate file, " +
+                       "install on the phone, scan";
+            return "Scan with the iPhone camera to pair";
         }
     }
 
@@ -4760,8 +4895,18 @@ namespace DictationBridge
             catch (Exception e)
             {
                 Log.Crash(e, "startup", true);
-                Log.Fatal("Dictation Bridge stopped before it could start listening.",
-                    e.GetType().Name + ": " + e.Message);
+                if (Servers.PortFailureText != null)
+                {
+                    // A reserved-port refusal: the box carries the remedy,
+                    // because with no console it is all a person sees.
+                    Log.Fatal("Dictation Bridge could not open a port.",
+                        Servers.PortFailureText);
+                }
+                else
+                {
+                    Log.Fatal("Dictation Bridge stopped before it could start listening.",
+                        e.GetType().Name + ": " + e.Message);
+                }
                 return 1;
             }
             finally
@@ -4789,6 +4934,20 @@ namespace DictationBridge
                     {
                         httpPort = parsed;
                         portWasChosen = true;
+                    }
+                    else
+                    {
+                        // A port given on the command line is never
+                        // second-guessed: not by moving to another one, and
+                        // not by quietly using the default either. Fail the
+                        // way an unusable port does -- a log line, a box, and
+                        // no app that is silently somewhere else.
+                        Log.Write("FATAL: " + args[i] + " " + args[i + 1] +
+                                  " is not a port number, so the app cannot start");
+                        Log.Fatal("The " + args[i] + " value was not a number.",
+                            "\"" + args[i + 1] + "\" is not a port number. Start the " +
+                            "app with  --port <number> , such as  --port 17123 .");
+                        return 1;
                     }
                 }
                 // For when the address the app picks is not the one the phone can

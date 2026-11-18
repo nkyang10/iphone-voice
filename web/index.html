@@ -7,8 +7,17 @@
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* No pull-to-refresh: a swipe down at the top of the page reloads it, which
+     ends the session and wipes the transcript (Safari 16+; older iOS ignores
+     this and keeps the rubber band). */
+  html, body { overscroll-behavior-y: none; }
   body {
-    margin: 0; padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
+    /* viewport-fit=cover runs under the notch, so each side takes its inset,
+       floored at the padding the page already had; the bottom keeps its
+       original base-plus-inset calc. */
+    margin: 0;
+    padding: max(20px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right))
+             calc(20px + env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
     font: 17px/1.45 -apple-system, system-ui, sans-serif;
     background: #0d0f12; color: #e8eaed;
     min-height: 100vh; display: flex; flex-direction: column; gap: 14px;
@@ -21,7 +30,7 @@
   .dot.bad { background: #ea4335; }
   .label { font-size: 14px; color: #9aa0a6; }
   select {
-    font: inherit; font-size: 15px; padding: 10px 12px; border-radius: 10px;
+    font: inherit; font-size: 16px; padding: 10px 12px; border-radius: 10px;
     background: #202124; color: #e8eaed; border: 1px solid #3c4043; flex: 1;
     /* A flex item is never narrower than its content by default, and the longest
        language name is wider than a phone: the box ran off the right edge. */
@@ -34,8 +43,10 @@ button {
     background: #202124; color: #e8eaed; width: 100%;
   }
   button:disabled { opacity: .45; }
-  #start { background: #1a73e8; border-color: #1a73e8; font-weight: 600; }
+  #start { background: #0b57d0; border-color: #0b57d0; color: #fff; font-weight: 600; }
   #stop { background: #202124; }
+  .runnote { display: none; font-size: 13px; color: #80868b; }
+  .runnote.show { display: block; }
   .card {
     background: #16181c; border: 1px solid #2a2d31; border-radius: 12px;
     padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
@@ -72,7 +83,7 @@ button {
   .diagout {
     display: none; max-height: 34vh; overflow: auto; margin: 8px 0 0;
     font: 11px/1.45 ui-monospace, Menlo, monospace; color: #9aa0a6;
-    white-space: pre-wrap; word-break: break-all; background: #12141700;
+    white-space: pre-wrap; word-break: break-all; background: #121417;
   }
   .diagout.show { display: block; }
   .ttime { color: #80868b; font-size: 12px; font-variant-numeric: tabular-nums;
@@ -84,6 +95,7 @@ button {
 <body>
 
 <h1>Dictation Bridge</h1>
+<div class="label">Tap Start listening and speak — your words are typed straight into the window your PC has focused.</div>
 
 <div class="row">
   <span class="dot" id="wsDot"></span>
@@ -109,6 +121,7 @@ button {
 
 <button id="start">Start listening</button>
 <button id="stop" disabled>Stop</button>
+<div class="runnote" id="startNote">Start is greyed while the microphone is listening — tap Stop to finish.</div>
 
 <div class="card">
   <h2>Heard</h2>
@@ -118,6 +131,10 @@ button {
 
 <div class="card">
   <h2>Transcript on this phone</h2>
+  <div class="row">
+    <button id="transCopy">Copy transcript</button>
+    <button id="transClear">Clear</button>
+  </div>
   <div id="transcript"></div>
 </div>
 
@@ -126,11 +143,6 @@ button {
 <div class="card">
   <h2>Desktop</h2>
   <div class="row"><span class="label">Typing</span><span class="val" id="typingState">checking</span></div>
-</div>
-
-<div class="card">
-  <h2>Page</h2>
-  <div id="stats"></div>
 </div>
 
 <div class="card">
@@ -149,6 +161,11 @@ button {
     <button id="diagToggle">Show log</button>
   </div>
   <pre id="diagOut" class="diagout"></pre>
+</div>
+
+<div class="card">
+  <h2>Page</h2>
+  <div id="stats"></div>
 </div>
 
 <script>
@@ -173,9 +190,12 @@ button {
     typeWarn: document.getElementById('typeWarn'),
     start: document.getElementById('start'),
     stop: document.getElementById('stop'),
+    startNote: document.getElementById('startNote'),
     final: document.getElementById('final'),
     interim: document.getElementById('interim'),
     transcript: document.getElementById('transcript'),
+    transCopy: document.getElementById('transCopy'),
+    transClear: document.getElementById('transClear'),
     logWords: document.getElementById('logWords'),
     diagSend: document.getElementById('diagSend'),
     diagCopy: document.getElementById('diagCopy'),
@@ -266,6 +286,10 @@ button {
   function syncStartButton() {
     el.start.disabled = wantRun;
     el.stop.disabled = !wantRun;
+    // The note under the buttons says what the grey means, so a first run does
+    // not read as a button gone dead. Same value, same place, so it cannot
+    // disagree with the button it explains.
+    el.startNote.className = wantRun ? 'runnote show' : 'runnote';
     // Every way out of a run passes through here, including the ones where the page
     // gives up by itself, so this is where the screen is allowed to lock again.
     if (!wantRun) releaseWake();
@@ -319,7 +343,8 @@ button {
     if (location.protocol === 'http:') {
       warn('SpeechRecognition needs a secure (https) page. This page was opened over plain http, ' +
            'so Safari hides the API. Reopen using the https:// address from the desktop window, ' +
-           'and install the certificate first.');
+           'and install the certificate first. (If the panel on the PC says the certificate ' +
+           'failed, there is no https address to reopen — do what the panel says first.)');
     } else if (!window.isSecureContext) {
       warn('This page is not a secure context, so Safari hides SpeechRecognition. ' +
            'Install the certificate from the desktop, then reopen the page.');
@@ -743,13 +768,18 @@ button {
 
   function streamFull(full, isFinal) {
     if (!full) return;
-    // A separator is only ever needed on the very first text of an epoch, and only
-    // when nothing from this epoch has been committed yet. Deciding it from
-    // streamAnchor alone was wrong: an epoch whose first few characters are all still
-    // inside the hold-back has an anchor already, so a flush of that same text lost
-    // its separator -- and gained one it should not have had, since it continues the
-    // same sentence.
-    var firstOfEpoch = (streamAnchor === '' && doneLen === 0);
+    // A separator is needed only on an epoch's first commit, the one commit with
+    // no left context of its own: without it, the epoch's first word butts
+    // against the last word the previous recognizer typed. "First" means
+    // nothing of this epoch has been committed yet (doneLen === 0), not that
+    // nothing has been recognized: an epoch whose opening characters are all
+    // still inside the hold-back has a streamAnchor already, and its first
+    // commit happens right here once the text grows past the hold. Requiring an
+    // empty anchor as well dropped the separator on exactly that commit, while
+    // flushHeld(), which can commit the same state on a final result, a pause or
+    // an exit, kept adding one -- so the two disagreed about the same sentence.
+    // One rule, both places: doneLen === 0.
+    var firstOfEpoch = (doneLen === 0);
     var limit;
 
     if (isFinal) {
@@ -881,6 +911,43 @@ button {
       el.transcript.appendChild(line);
     }
   }
+
+  // Copy takes the transcript out through the same clipboard the report uses;
+  // Clear drops this session's record on purpose. Both are the user's own
+  // doing: nothing here sends, retries or re-types anything, and the outbox is
+  // not touched, so words still waiting to send stay waiting.
+  function transcriptText() {
+    var rows = typedLines.slice(-40), out = [];
+    for (var i = 0; i < rows.length; i++) out.push(rows[i].t);
+    return out.join('\n');
+  }
+
+  el.transCopy.addEventListener('click', function () {
+    var text = transcriptText();
+    if (!text) {
+      flashLabel(el.transCopy, 'Nothing to copy', 'Copy transcript');
+      return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        flashLabel(el.transCopy, 'Copied', 'Copy transcript');
+      }).catch(function () {
+        flashLabel(el.transCopy, 'Copy failed', 'Copy transcript');
+      });
+    } else {
+      flashLabel(el.transCopy, 'Copy failed', 'Copy transcript');
+    }
+  });
+
+  el.transClear.addEventListener('click', function () {
+    if (!typedLines.length) {
+      flashLabel(el.transClear, 'Already clear', 'Clear');
+      return;
+    }
+    typedLines = [];
+    renderHistory();
+    flashLabel(el.transClear, 'Cleared', 'Clear');
+  });
 
   function updatePending() {
     if (outbox.length === 0) {
@@ -1027,6 +1094,16 @@ button {
     { code: 'ko-KR', label: 'Korean (ko-KR)', fall: ['en-US'] }
   ];
 
+  // The picker shows each code as a friendly name, and a message a user reads
+  // should do the same. Notes, logs and the report keep the raw code: that is
+  // the thing a support conversation actually needs.
+  function langLabel(code) {
+    for (var i = 0; i < LANGS.length; i++) {
+      if (LANGS[i].code === code) return LANGS[i].label;
+    }
+    return code;
+  }
+
   // Safari is picky about Cantonese: yue-HK is the correct BCP-47 tag, but some
   // iOS versions only accept zh-HK. If a language is rejected we walk this list
   // rather than retrying the same code forever with no output.
@@ -1056,7 +1133,8 @@ button {
     activeLang = langChain[langIndex];
     stats.langTries++;
     setRec('warn', 'trying ' + activeLang);
-    warn('iOS does not accept ' + rejected + ' for recognition. Trying ' + activeLang + '.');
+    warn('iOS does not accept ' + langLabel(rejected) + ' for recognition. Trying ' +
+         langLabel(activeLang) + '.');
     rearm('lang-rejected');
     return activeLang;
   }
@@ -1086,7 +1164,7 @@ button {
     note('env', 'secure=' + window.isSecureContext + ' proto=' + location.protocol);
     note('env', 'SR=' + (window.SpeechRecognition ? 'unprefixed' :
                          window.webkitSpeechRecognition ? 'webkit' : 'ABSENT'));
-    note('env', 'audioWorklet=' + (!!(window.AudioContext || window.webkitAudioContext)));
+    note('env', 'audioContext=' + (!!(window.AudioContext || window.webkitAudioContext)));
     note('env', 'wakeLock=' + ('wakeLock' in navigator));
     note('env', 'speechSynthesis=' + (typeof window.speechSynthesis !== 'undefined'));
     note('env', 'mediaDevices=' + !!navigator.mediaDevices);
@@ -1098,6 +1176,7 @@ button {
         }).catch(function (e) { note('env', 'enumerateDevices failed: ' + e.name); });
       } catch (e) { note('env', 'enumerateDevices threw: ' + e.message); }
     }
+    // Test-harness-only probe: no real browser has window.SpeechRecognition.available.
     if (window.SpeechRecognition && window.SpeechRecognition.available) {
       try {
         var p = window.SpeechRecognition.available({ langs: [chosenLang()], processLocally: false });
@@ -1290,8 +1369,8 @@ button {
           wantRun = false;
           retireCurrent();
           setRec('bad', 'no usable language');
-          warn('iOS rejected ' + wantedLang + ' and every fallback (' +
-               langChain.join(', ') + '). Pick a different language above and tap Start again.');
+          warn('iOS rejected ' + langLabel(wantedLang) + ' and every fallback (' +
+               langChain.map(langLabel).join(', ') + '). Pick a different language above and tap Start again.');
         }
         return;
       }
@@ -1315,7 +1394,8 @@ button {
         }
         setRec('bad', 'mic blocked');
         warn('Microphone access is blocked for this site. Allow the microphone in ' +
-             'Settings > Safari > Microphone, then tap Start again.');
+             'Settings > Safari > Microphone (on newer iOS, Safari is under ' +
+             'Settings > Apps), then tap Start again.');
         return;
       }
 
@@ -1472,9 +1552,9 @@ button {
       retireCurrent();
       setRec('bad', 'nothing heard in any language');
       warn('iOS started dictation but nothing was heard in any language (' +
-           langChain.join(', ') + '). This is usually a microphone or permission ' +
-           'problem rather than the page. Check Settings > Safari > Microphone, ' +
-           'then pick another language above and tap Start again.');
+           langChain.map(langLabel).join(', ') + '). This is usually a microphone or permission ' +
+           'problem rather than the page. Check Settings > Safari > Microphone (on newer iOS, ' +
+           'Safari is under Settings > Apps), then pick another language above and tap Start again.');
       note('deaf', 'every language heard nothing; giving up until the next tap');
     }
   }, 2000);
@@ -1754,6 +1834,11 @@ button {
   // still saying "listening" came back from the cache with Start greyed and nothing
   // running, and nothing would ever light it again.
   window.addEventListener('pagehide', function (ev) {
+    // Everything that fires this event -- pull-to-refresh, a swipe back, a
+    // reload -- takes the in-memory transcript with it. Carry it first, before
+    // the stop below can be cut short: storage writes only, nothing deferred,
+    // so it is safe to run even in a page that is being torn down.
+    carryTranscript();
     note('ui', 'pagehide' + (ev && ev.persisted ? ' into the back-forward cache' : ''));
     // stop() sends whatever is held back. Best effort, like the flush after it: a
     // fetch started here usually does not finish, and navigator.sendBeacon cannot
@@ -1895,7 +1980,7 @@ button {
   setInterval(function () {
     if (wantRun) note('beat', 'sessions=' + stats.sessions + ' heard=' + stats.heard +
       ' chunks=' + stats.streamed + ' rewrites=' + stats.rewrites +
-      ' queued=' + outbox.length + ' btn=' + (el.start.disabled ? 'off' : 'ON') +
+      ' queued=' + outbox.length + ' btn=' + (el.start.disabled ? 'greyed' : 'tappable') +
       '/' + (!wantRun ? 'not-running' : !rec ? 'no-recognizer' : recEnded ? 'ios-ended'
                   : !recStartedOk ? 'waiting-onstart' : 'live') +
       ' fault=' + (recFault || '-') +

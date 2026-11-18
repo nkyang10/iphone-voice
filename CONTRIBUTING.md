@@ -22,7 +22,7 @@ Edit `web/index.html`, rebuild, and copy the exe to wherever you are testing. Th
 stops a running copy of the app first, because Windows will not let you overwrite a file
 that is executing.
 
-**`.\build.ps1` always refreshes `release\DictationBridge-1.0.0\`**, so the exe you copy to
+**`.\build.ps1` always refreshes `release\DictationBridge-<version>\`**, so the exe you copy to
 another machine is the same one you just built — byte for byte, worth checking with
 `Get-FileHash` after a build. It does this by calling `make-release.ps1 -UseExistingExe`,
 which assembles the folder from the built exe without compiling again but still runs every

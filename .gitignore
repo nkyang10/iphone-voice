@@ -5,7 +5,9 @@
 data/
 
 # The served page is compiled into the exe by build.ps1; web\index.html is the
-# source of truth. desktop\index.html is only written for local editing.
+# only source of truth. desktop\index.html is a build-generated staging copy of
+# it, kept beside the exe for the no-resource fallback and overwritten by
+# every build; never edit it by hand.
 desktop/index.html
 
 # Local runtime output.

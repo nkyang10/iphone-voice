@@ -31,7 +31,7 @@ That is the only supported build command. It compiles with the `csc.exe` shipped
 `Microsoft.NET\Framework64\v4.0.30319` and embeds `web/index.html` as a resource named
 `DictationBridge.page.html`.
 
-**`build.ps1` always refreshes `release\DictationBridge-1.0.0\`.** The exe that gets
+**`build.ps1` always refreshes `release\DictationBridge-<version>\`.** The exe that gets
 tested has to be the exe that gets released: the release folder was holding a 137 KB exe
 while the working build was 156 KB, which is a stale-binary report waiting to happen. It
 calls `make-release.ps1 -UseExistingExe`, which owns the folder's contents and copies

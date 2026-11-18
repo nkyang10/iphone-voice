@@ -11,8 +11,12 @@
 #
 # The page is embedded so the exe is a single self-contained file. The desktop
 # prefers the embedded copy, which means a file dropped next to the exe cannot
-# change what the phone is served. A copy of web\index.html is still written
-# alongside it so it stays editable and reviewable.
+# change what the phone is served. desktop\index.html is a build-generated
+# staging copy of web\index.html, written beside the exe only as the fallback
+# the app reads if a build ever ships without the resource. web\index.html is
+# the only source of truth; never edit the staged copy -- build.ps1 overwrites
+# it below, and the copy step is guarded so a hand edit is reported rather
+# than silently discarded.
 #
 # Uses the .NET Framework csc.exe, which ships with Windows, so no SDK install
 # and no network access are needed.
@@ -50,7 +54,32 @@ $vendor = Join-Path $root 'vendor\QRCoder'
 $vendorSrc = @(Get-ChildItem $vendor -Recurse -Filter *.cs | ForEach-Object { $_.FullName })
 if ($vendorSrc.Count -eq 0) { throw "no vendored QRCoder source under $vendor" }
 
-# Keep the served copy in step with the source of truth.
+# Keep the staged copy in step with the source of truth, but never blindly: a
+# hand edit to desktop\index.html used to be discarded by this -Force copy with
+# no message, while the editor believed their fix had shipped. The legitimate
+# states are "equal to web\index.html" (fresh) and "equal to the page embedded
+# in the current desktop\DictationBridge.exe" (stale, from the last build).
+# Anything else is a hand edit that would be destroyed, so the build stops
+# instead of copying over it. With no exe on disk yet there is nothing to
+# compare against but web\index.html, so only that state is accepted. The
+# embedded page is read the same way make-release.ps1 reads it: as UTF-8
+# bytes, never Get-Content, which under PowerShell 5.1 mangles any non-ASCII
+# character through the console's ANSI code page.
+if (Test-Path $stage) {
+    $stageText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($stage))
+    $pageText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($page))
+    if ($stageText -ne $pageText) {
+        $stale = $false
+        if (Test-Path $exe) {
+            $exeText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($exe))
+            if ($exeText.Contains($stageText)) { $stale = $true }
+        }
+        if (-not $stale) {
+            throw "desktop\index.html has edits that will be discarded -- web\index.html is the source of truth; move your changes there and rebuild."
+        }
+        Write-Host "desktop\index.html still held the last build's page; refreshing it from web\index.html"
+    }
+}
 Copy-Item $page $stage -Force
 
 # Explicit resource name: the default would be namespace-prefixed and brittle.
@@ -67,7 +96,9 @@ Write-Host "built $exe  ($size KB)"
 Write-Host "embedded: DictationBridge.page.html  ($([math]::Round((Get-Item $page).Length / 1KB, 1)) KB)"
 Write-Host "vendored: QRCoder encoder  ($($vendorSrc.Count) files, compiled in)"
 
-# Refresh release\DictationBridge-1.0.0 from what was just built.
+# Refresh release\DictationBridge-<version> from what was just built. The
+# version, and with it the folder's name, belong to make-release.ps1 -- this
+# script never names the folder itself.
 #
 # The exe that gets tested is the one that gets released. Having two copies is how a
 # bug gets fixed in one and verified against the other -- the release folder held a
