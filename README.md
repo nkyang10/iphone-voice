@@ -97,6 +97,10 @@ whether you can press it, and that now follows the microphone:
 | Blue, pressable | Stopped, or the page gave up. Tap to start. |
 | Greyed out | The page is still trying to listen and words will be typed. Nothing to do. |
 
+<p align="center">
+  <img src="docs/phone-page.png" width="320" alt="The phone page on first open: Start is blue and pressable, ready to tap">
+</p>
+
 It comes back on its own the moment dictation really stops: the microphone was refused,
 every language was tried, or the phone accepted dictation several times and never opened
 the microphone. Those are the only moments a tap can help, so those are the only moments
