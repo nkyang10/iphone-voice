@@ -302,6 +302,7 @@ iOS 要開咗語音輸入或者 Siri 先會做語音辨識。去 設定 > 一般
 用 `.\build.ps1` 編譯，或者用 `.\make-release.ps1` 整一個可以直接擺俾人嘅資料夾。用嘅係
 Windows 本身附帶嘅 C# 編譯器，所以唔使裝 SDK。點樣驗證改動睇
 [CONTRIBUTING.md](CONTRIBUTING.md)，項目慣例同啲易踩嘅坑睇 [AGENTS.md](AGENTS.md)。
+各版本之間改咗啲乜，睇[更新日誌](CHANGELOG.md)。
 
 ## 授權
 

@@ -305,7 +305,7 @@ Wi-Fi。如果面板显示上面两条消息之一，按它说的做。
 
 使用 `.\build.ps1` 构建，或 `.\make-release.ps1` 生成一个可直接分发的文件夹。采用
 Windows 自带的 C# 编译器，无需安装 SDK。如何验证改动见 [CONTRIBUTING.md](CONTRIBUTING.md)，
-项目约定与常见陷阱见 [AGENTS.md](AGENTS.md)。
+项目约定与常见陷阱见 [AGENTS.md](AGENTS.md)。各版本之间的改动见[更新日志](CHANGELOG.md)。
 
 ## 许可
 
